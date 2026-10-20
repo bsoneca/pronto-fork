@@ -111,6 +111,10 @@ await run(Deno.execPath(), [
   ...(flags['--from'] ? ['--from', path.resolve(flags['--from']), '--pgroll', pgroll] : []),
 ])
 
+// The passkey ceremonies' library, from mecha-edge's own lock.
+const edgePackage = path.join(mecha, 'packages/mecha-edge')
+await run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], edgePackage)
+
 const rel = (p: string) => {
   const r = path.relative(out, p)
   return r.startsWith('.') ? r : `./${r}`
@@ -166,6 +170,7 @@ await Deno.writeTextFile(path.join(out, 'wrangler.jsonc'), JSON.stringify({
     '@electric-sql/pglite': './pglite/index.js',
     '@electric-sql/pglite/basefs': './pglite/fs/base.js',
     '@mecha/postgrest-js': rel(path.join(mecha, 'packages/postgrest-js/src/index.ts')),
+    '@simplewebauthn/server': rel(path.join(edgePackage, 'node_modules/@simplewebauthn/server/esm/index.js')),
   },
 }, null, 2) + '\n')
 if (flags['--ssr-origin']) {
