@@ -12,11 +12,13 @@
 //                or, with --from, a copy of a directory built elsewhere (an
 //                archive) with the pgroll migrations its ledger lacks applied
 //                (pgdata.ts), the set read from the app's cluster by cue
-// <out>/src/index.ts, <out>/wrangler.jsonc
+// <out>/src/index.ts, <out>/wrangler.jsonc, whose vars name the providers a
+//                person signs in through (edge-signin.ts)
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { writeEdgeAssets, type StaticAsset } from './edge-assets.ts'
 import { addressEdgeAssets, separateAssetDirectories } from './edge-addresses.ts'
+import { signInVars } from './edge-signin.ts'
 import { writeEdgeSsr } from './edge-ssr.ts'
 
 function fail(msg: string): never {
@@ -74,6 +76,15 @@ const statics = await new Deno.Command('cue', {
 }).output()
 if (!statics.success) fail('cue export of public assets failed')
 const { statics: terminalStatics, clusterStatics } = JSON.parse(new TextDecoder().decode(statics.stdout)) as { statics: StaticAsset[]; clusterStatics: StaticAsset[] }
+const signIn = await new Deno.Command('cue', {
+  // A mecha with no provider sign-in has no signIn: no provider either.
+  args: ['export', '.', '-e', '*cluster.capabilities.signIn | {}', '--out', 'json'],
+  cwd: app, stdout: 'piped', stderr: 'inherit',
+}).output()
+if (!signIn.success) fail("cue export of the cluster's signIn failed")
+let vars: Record<string, string>
+try { vars = signInVars(JSON.parse(new TextDecoder().decode(signIn.stdout)), (name) => Deno.env.get(name)) }
+catch (e) { fail((e as Error).message) }
 await writeEdgeAssets(app, omnishell, publicDir, [...terminalStatics, ...clusterStatics])
 const hints = await addressEdgeAssets(publicDir, previousAssets)
 await Deno.writeTextFile(path.join(out, 'src/hints.json'), JSON.stringify(hints))
@@ -142,6 +153,7 @@ await Deno.writeTextFile(path.join(out, 'wrangler.jsonc'), JSON.stringify({
   assets: { directory: './public', binding: 'ASSETS', run_worker_first: ['/'] },
   durable_objects: { bindings: [{ name: 'CLUSTER', class_name: 'Cluster' }] },
   version_metadata: { binding: 'CF_VERSION_METADATA' },
+  ...(Object.keys(vars).length ? { vars } : {}),
   migrations: [{ tag: 'v1', new_sqlite_classes: ['Cluster'] }],
   observability: { enabled: true },
   ...(domain ? { routes: [{ pattern: domain, custom_domain: true }] } : { workers_dev: true }),

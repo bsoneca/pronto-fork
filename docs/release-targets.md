@@ -12,7 +12,7 @@ the same name, so the word in `program.cue` is the word after `@` in
 `sayt release@<target>`. A release builds the immutable artifact the target
 consumes, runs the version ceremony and makes the artifact live; each target
 carries the whole app on one tier of mecha's ladder. `pages`, `cloudflare`,
-`docker` and `gcp` are built, `cloudflare` for guests and without derivations,
+`docker` and `gcp` are built, `cloudflare` for guests and providers and without derivations,
 `docker` as a single-container standalone appliance, `gcp` for a cluster of the
 database, crud, auth and electric alone. `aws`, `azure` and `k8s` are designed
 and [not built](../PENDING.md#release-targets). How an author releases an app is
@@ -270,7 +270,7 @@ service, and nothing runs while no one uses the app:
 | compose service | at the edge | sleeps | |
 |---|---|---|---|
 | caddy | the Worker: static files, `/crud`, `/auth`, `/electric`, settled reads from the Cache API | per request | built |
-| database, crud, electric, auth | one Durable Object running mecha's edge cluster on PGlite, its data directory in the object's SQLite | when idle | built, guests only |
+| database, crud, electric, auth | one Durable Object running mecha's edge cluster on PGlite, its data directory in the object's SQLite | when idle | built, guests and providers |
 | conduit, mesh-events | an outbox table and a Cloudflare Queue | — | designed |
 | transform, compute | a Container each, from the images bayt builds | after an idle timeout | designed |
 | ticker | the Cron Trigger | — | designed |
@@ -314,9 +314,17 @@ What fixes its shape, as built:
   [`createRestHandler`](https://github.com/bonisoft3/mecha/blob/v0.12.1/packages/postgrest-js/src/rest-handler.ts)
   opens each request with a transaction-local role, `app.scopes` and
   `request.jwt.claims`, so a shared connection never leaks a subject, and row
-  policy is Postgres's own here as on a single machine. Guests only:
-  `/auth/guest` mints the credentials; passkeys and providers wait for mecha's
-  auth service to run in the Worker.
+  policy is Postgres's own here as on a single machine. `/auth/guest` mints
+  a guest's credentials, and the object runs the auth service's provider
+  sign-in (`/auth/oidc/*`) for the providers the program names
+  (`auth.providers`): [`edge-signin.ts`](../bundle/edge-signin.ts) writes the
+  settings compose would give the auth service into the Worker's vars, the
+  program's or the build environment's `OIDC_<NAME>_<SETTING>`, and
+  `publish-edge.ts` puts each client secret, `OIDC_<NAME>_CLIENT_SECRET` from
+  its environment, beside `JWT_SECRET`; register the callback
+  `<origin>/auth/oidc/<name>/callback` with the provider. Passkeys wait for
+  the auth service's ceremonies to run in the Worker, so an app on this target
+  offers a guest and its providers, and a passkey that fails.
 - **Sync holds requests open.** A tab's live shape request waits on the
   object, which keeps the object awake while a tab is open; that is the price
   of the simplest path, and a poke on a hibernating WebSocket is the cheaper
