@@ -7,7 +7,8 @@
 //     [--derived <file> | --from <dir>] [--assets-from <previous-public-dir>] [--ssr-origin <https-origin>] [--ssr-database existing|separate]
 //
 // <out>/public   the terminal and app assets; data requests reach the Worker
-// <out>/pglite   pglite-workerd's package, baked from mecha's pinned sources
+// <out>/pglite   pglite-workerd's package, baked from mecha's pinned sources,
+//                in Cloud Build with EDGE_BUILD_PROJECT=<project>
 // <out>/pgdata   rls.sql, the migrations and --derived's rows, applied on disk;
 //                or, with --from, a copy of a directory built elsewhere (an
 //                archive) with the pgroll migrations its ledger lacks applied
@@ -20,6 +21,7 @@ import { writeEdgeAssets, type StaticAsset } from './edge-assets.ts'
 import { addressEdgeAssets, separateAssetDirectories } from './edge-addresses.ts'
 import { signInVars } from './edge-signin.ts'
 import { writeEdgeSsr } from './edge-ssr.ts'
+import { buildPglite } from './edge-pglite.ts'
 
 function fail(msg: string): never {
   console.error(`edge: ${msg}`)
@@ -89,12 +91,10 @@ await writeEdgeAssets(app, omnishell, publicDir, [...terminalStatics, ...cluster
 const hints = await addressEdgeAssets(publicDir, previousAssets)
 await Deno.writeTextFile(path.join(out, 'src/hints.json'), JSON.stringify(hints))
 
-// PGlite for workerd. Bake reads the project's compose from its .bayt/, and a
-// local export adds to its destination, which is fresh here.
+// PGlite for workerd: baked in Cloud Build when EDGE_BUILD_PROJECT names a
+// project, by the local Docker otherwise (edge-pglite.ts).
 const pglite = path.join(out, 'pglite')
-const workerd = path.join(mecha, 'packages/pglite-workerd')
-await run('docker', ['buildx', 'bake', `--allow=fs.read=${workerd}`, `--allow=fs.write=${out}`, '-f', 'compose.yaml', '--set', `package.output=type=local,dest=${pglite}`, 'package'], path.join(workerd, '.bayt'))
-await Deno.remove(path.join(pglite, '.bayt'), { recursive: true })
+await buildPglite(path.join(mecha, 'packages/pglite-workerd'), pglite, Deno.env.get('EDGE_BUILD_PROJECT') || undefined, run, fail)
 
 // An archive's missing migrations are the cluster's pgroll set less its ledger.
 const pgroll = path.join(out, 'pgroll.json')
