@@ -5,6 +5,8 @@ import (
 	"encoding/yaml"
 	"list"
 	"strings"
+
+	"github.com/bonisoft3/pronto/resilience"
 )
 
 // #Release is an app on GCP: Cloud SQL for its database, and caddy, crud, auth
@@ -53,6 +55,12 @@ import (
 	// environment compose gives it beside its DATABASE_URL, filled by the release.
 	migrate?: env: [string]: string
 
+	// The roles the app's schema grants PostgREST's login, as generate wrote them
+	// (.pronto/cluster.json, the k8s release's source too): what the job grants
+	// Cloud SQL's postgres SET on, since which of them exist is the program's.
+	// Filled by the release.
+	database: tokenRoles: [...string]
+
 	auth: {
 		// The providers compose gives the auth service, filled by the release;
 		// overrides here win, as a deployment's environment does in compose.
@@ -94,7 +102,9 @@ import (
 		// $(VAR) inside a value.
 		secrets: {
 			POSTGRES_PASSWORD: "\(R._id)-postgres-password"
-			ELECTRIC_PASSWORD: "\(R._id)-electric-password"
+			// The roles' passwords the image's initdb step sets (899_role_passwords.sh).
+			ELECTRIC_PASSWORD:      "\(R._id)-electric-password"
+			AUTHENTICATOR_PASSWORD: "\(R._id)-authenticator-password"
 			PGRST_JWT_SECRET:  "\(R._id)-pgrst-jwt-secret"
 			ELECTRIC_SECRET:   "\(R._id)-electric-secret"
 			CRUD_DB_URI:       "\(R._id)-crud-db-uri"
@@ -135,6 +145,7 @@ import (
 		out: {name: env, valueFrom: secretKeyRef: {name: secret, key: "latest"}}
 	}
 	let sq = R.names.secrets
+	let bounds = resilience.resilience.timeouts
 
 	service: {
 		apiVersion: "serving.knative.dev/v1"
@@ -199,6 +210,8 @@ import (
 					image: (imageOf & {svc: "auth"}).out
 					env: list.Concat([[
 						(secretOf & {env: "DATABASE_URL", secret: sq.AUTH_DATABASE_URL}).out,
+						// The service refuses to start without its statement bound.
+						{name: "AUTH_STATEMENT_TIMEOUT_MS", value: "\(bounds.statement.client*1000)"},
 						(secretOf & {env: "PGRST_JWT_SECRET", secret: sq.PGRST_JWT_SECRET}).out,
 						if R._rpId != "" {{name: "WEBAUTHN_RP_ID", value: R._rpId}},
 						if R._origin != "" {{name: "WEBAUTHN_ORIGIN", value: R._origin}},
@@ -262,7 +275,7 @@ import (
 							fi
 							# Cloud SQL's postgres is no superuser: crud and auth connect as it
 							# and switch into these, which it created but holds no SET on.
-							psql -v ON_ERROR_STOP=1 -XqAc "GRANT anon, app_user, service TO postgres WITH INHERIT FALSE, SET TRUE"
+							psql -v ON_ERROR_STOP=1 -XqAc "GRANT \(strings.Join(R.database.tokenRoles, ", ")) TO postgres WITH INHERIT FALSE, SET TRUE"
 							"""]
 						env: [
 							{name: "PGHOST", value: "/cloudsql/\(R.names.connection)"},
@@ -272,6 +285,7 @@ import (
 							{name: "POSTGRES_DB", value: R.names.database},
 							(secretOf & {env: "PGPASSWORD", secret: sq.POSTGRES_PASSWORD}).out,
 							(secretOf & {env: "ELECTRIC_PASSWORD", secret: sq.ELECTRIC_PASSWORD}).out,
+							(secretOf & {env: "AUTHENTICATOR_PASSWORD", secret: sq.AUTHENTICATOR_PASSWORD}).out,
 						]
 					}]
 				}

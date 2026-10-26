@@ -6,7 +6,7 @@
 # described before it is made, so a release runs again unchanged: the same
 # images push the same digests and roll nothing, and initdb finds its marker.
 
-use ../k8s/release.nu [resolve-app]
+use ../k8s/release.nu [resolve-app auth-provider-environment bake-images]
 
 # The services this target runs; anything else in the app's compose project
 # needs what it does not build yet (PENDING.md#release-targets).
@@ -20,7 +20,16 @@ def --wrapped gc [...args] {
 	if $r.exit_code != 0 { error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"} }
 	$r.stdout
 }
-def --wrapped exists [...args]: nothing -> bool { (^gcloud --quiet ...$args | complete).exit_code == 0 }
+# Whether a resource is there. Only its absence answers false: an expired
+# token, a disabled API or a network that dropped would otherwise read as a
+# resource to create, and the creation then dies on one that exists.
+def --wrapped exists [...args]: nothing -> bool {
+	let r = (^gcloud --quiet ...$args | complete)
+	if $r.exit_code != 0 and not ($r.stderr =~ "NOT_FOUND|HTTPError 404|Cannot find|does not exist|not found|was not found") {
+		error make {msg: $"gcloud ($args | str join ' '): ($r.stderr | str trim)"}
+	}
+	$r.exit_code == 0
+}
 
 def render [cue_path: string, data?: string]: nothing -> record {
 	let inputs = [$cue_path] | append (if ($data | is-not-empty) { [$data] } else { [] })
@@ -29,9 +38,7 @@ def render [cue_path: string, data?: string]: nothing -> record {
 	$res.stdout | from json
 }
 
-def random-secret []: nothing -> string {
-	^python3 -I -c 'import secrets,string;a=string.ascii_letters+string.digits;print("".join(secrets.choice(a) for _ in range(48)),end="")'
-}
+def random-secret []: nothing -> string { random chars --length 48 }
 
 # A secret's latest value, made from `value` (or a random one) when it has none,
 # and given a new version only when `value` differs from it.
@@ -81,6 +88,7 @@ def ensure-infrastructure [plan: record] {
 
 	let pg = (ensure-secret $n.secrets.POSTGRES_PASSWORD $p)
 	let electric = (ensure-secret $n.secrets.ELECTRIC_PASSWORD $p)
+	ensure-secret $n.secrets.AUTHENTICATOR_PASSWORD $p | ignore
 	ensure-secret $n.secrets.PGRST_JWT_SECRET $p | ignore
 	ensure-secret $n.secrets.ELECTRIC_SECRET $p | ignore
 	# Through the Auth Proxy on localhost, which carries TLS itself.
@@ -124,21 +132,13 @@ def push-image [ref: string] {
 	error make {msg: $"docker push ($ref): ($last)"}
 }
 
-# The runtime images, built as the app's compose project builds them and pushed
-# by digest: what integrate tested is what releases.
-def push-images [app_dir: string, plan: record, name: string, services: list<string>]: nothing -> record {
+# The runtime images, built as the app's compose project builds them (the
+# k8s release's bake) and pushed by digest: what integrate tested is what releases.
+def push-images [app_dir: string, compose: string, plan: record, name: string, services: list<string>]: nothing -> record {
 	let host = ($plan.registry | split row "/" | first)
 	# A short-lived token, not a credential helper written into Docker's config.
 	gc auth print-access-token | ^docker login --username oauth2accesstoken --password-stdin $"https://($host)"
-	let root = (do { cd $app_dir; ^git rev-parse --show-toplevel } | str trim)
-	do {
-		cd $app_dir
-		# Reproducible, so an unchanged source pushes the digest it pushed before.
-		with-env {SOURCE_DATE_EPOCH: "0"} {
-			^docker compose --profile "*" config | ^docker buildx bake -f - --load --provenance=false $"--allow=fs.read=($root)" --set "*.platform=linux/amd64" ...$services
-		}
-	}
-	let targets = (do { cd $app_dir; ^docker compose --profile "*" config | ^docker buildx bake -f - --print ...$services } | from json | get target)
+	let targets = (bake-images $app_dir $compose $services --platform linux/amd64)
 	$services | each {|svc|
 		let local = ($targets | get $svc | get tags | where {|t| $t ends-with ":latest" } | first)
 		let repo = $"($plan.registry)/($name)-($svc)"
@@ -224,7 +224,12 @@ export def main [
 	# sayt hands a release's own flags over as SAY_RELEASE_ARGS_<FLAG>.
 	let preview = ($preview | default ($env.SAY_RELEASE_ARGS_PREVIEW? | default ""))
 	let delete = ($delete or (($env.SAY_RELEASE_ARGS_DELETE? | default "") | is-not-empty))
-	let base = if ($preview | is-empty) { {} } else { {GCP: {preview: $preview}} }
+	# The roles the app's schema grants PostgREST's login, as generate wrote them.
+	let facts_path = ($app_info.cue_path | path dirname | path join .pronto cluster.json)
+	if not ($facts_path | path exists) { error make {msg: $"($facts_path) is missing: generate the app before releasing it"} }
+	let facts = (open $facts_path)
+	if not $facts.server { error make {msg: $"($facts_path): this app has no server tier to release to GCP"} }
+	let base = {GCP: ({database: {tokenRoles: $facts.tokenRoles}} | merge (if ($preview | is-empty) { {} } else { {preview: $preview} }))}
 	let base_file = (mktemp -t gcp.XXXXXX.json | str trim)
 	$base | to json | save -f $base_file
 	let plan0 = (render $app_info.cue_path $base_file)
@@ -234,35 +239,42 @@ export def main [
 		delete-preview $plan0
 		return
 	}
-	let services = (do { cd $app_info.dir; ^docker compose --profile "*" config --services } | lines)
+	# The app's compose project, resolved once: its services, what it gives
+	# auth and migrate, and the project bake builds.
+	let compose_text = (do { cd $app_info.dir; ^docker compose --profile "*" config --format json })
+	let compose = ($compose_text | from json)
+	let services = ($compose.services | columns)
 	let refused = ($services | where {|s| $s in $unbuilt })
 	if ($refused | is-not-empty) {
 		error make {msg: $"release@gcp does not run ($refused | str join ', ') yet \(PENDING.md#release-targets\)"}
 	}
 	if $dry_run { print $plan0.jobYaml; print "---"; print $plan0.serviceYaml; return }
+	# Not a pinned tool: the Cloud CLI is its own install, and only this
+	# release needs it (PENDING.md#release-targets).
+	if not $snapshot and (which gcloud | is-empty) { error make {msg: "gcloud is not on PATH: release@gcp runs with the Google Cloud CLI installed"} }
 
 	let name = (^cue export --expression GCP.name --out text $app_info.cue_path | str trim)
 	# The cluster's migrate step runs where the app has pgroll migrations to carry, as in compose.
 	let has_migrate = ("migrate" in $services)
-	let pushed = if $snapshot { {} } else { ensure-infrastructure $plan0; push-images $app_info.dir $plan0 $name ($runtime | append (if $has_migrate { ["migrate"] } else { [] })) }
+	let pushed = if $snapshot { {} } else { ensure-infrastructure $plan0; push-images $app_info.dir $compose_text $plan0 $name ($runtime | append (if $has_migrate { ["migrate"] } else { [] })) }
 
 	# The providers compose gives the auth service, under what release.cue sets.
-	let compose = (do { cd $app_info.dir; ^docker compose --profile "*" config --format json } | from json)
 	let auth_env = $compose.services.auth.environment
 	let fixed = (^cue export --expression GCP.auth.oidc --out json $app_info.cue_path | from json | columns)
-	let oidc = ($auth_env | transpose key value | where {|e| ($e.key starts-with "OIDC_") and ($e.key not-in $fixed) and not ($e.key ends-with "_CLIENT_SECRET") }
-		| reduce -f {} {|it, acc| $acc | insert $it.key $it.value })
+	let oidc = ((auth-provider-environment $auth_env).oidc | reject -o ...$fixed)
 	let number = (gc projects describe $plan0.project --format "value(projectNumber)" | str trim)
 	let data_file = (mktemp -t gcp.XXXXXX.json | str trim)
 	let migrate = if $has_migrate { {migrate: {env: ($compose.services.migrate.environment? | default {} | reject -o DATABASE_URL)}} } else { {} }
 	{GCP: ({image: {pushed: $pushed}, auth: {oidc: $oidc, programProviders: ($auth_env.OIDC_PROVIDERS? | default "")}, runHost: $"($plan0.service)-($number).($plan0.region).run.app"} | merge $migrate | merge ($base.GCP? | default {}))} | to json | save -f $data_file
 	let plan = (render $app_info.cue_path $data_file)
 	rm $data_file
-	mkdir dist/gcp
-	$plan.jobYaml | save -f dist/gcp/job.yaml
-	$plan.serviceYaml | save -f dist/gcp/service.yaml
-	if $has_migrate { $plan.migrateJobYaml | save -f dist/gcp/migrate.yaml }
-	if $snapshot { print "gcp: rendered dist/gcp/job.yaml and dist/gcp/service.yaml; nothing applied"; return }
+	# The app's own dist, wherever the release was started from.
+	let dist = ($app_info.dir | path join dist gcp)
+	mkdir $dist
+	$plan.jobYaml | save -f ($dist | path join job.yaml)
+	$plan.serviceYaml | save -f ($dist | path join service.yaml)
+	if $has_migrate { $plan.migrateJobYaml | save -f ($dist | path join migrate.yaml) }
+	if $snapshot { print $"gcp: rendered ($dist)/job.yaml and ($dist)/service.yaml; nothing applied"; return }
 
 	let p = $plan.project
 	let r = $plan.region
@@ -271,9 +283,9 @@ export def main [
 			error make {msg: $"secret ($key) is missing: create it with `gcloud secrets create ($key) --project ($p) --data-file=-`"}
 		}
 	}
-	run-job dist/gcp/job.yaml $plan.names.job "building the schema" $p $r
-	if $has_migrate { run-job dist/gcp/migrate.yaml $plan.names.migrateJob "carrying the schema forward" $p $r }
-	gc run services replace dist/gcp/service.yaml --region $r --project $p | ignore
+	run-job ($dist | path join job.yaml) $plan.names.job "building the schema" $p $r
+	if $has_migrate { run-job ($dist | path join migrate.yaml) $plan.names.migrateJob "carrying the schema forward" $p $r }
+	gc run services replace ($dist | path join service.yaml) --region $r --project $p | ignore
 	gc run services add-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker | ignore
 
 	let address = $"https://($plan.service)-($number).($r).run.app"
