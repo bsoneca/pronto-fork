@@ -483,9 +483,18 @@ def deploy [app_info: record, preview: string, dry_run: bool, snapshot: bool, fr
 	# Live means the address answers, not that gcloud returned, which waits for
 	# the revision to be ready: half a minute at most, not curl's backoff,
 	# whose eighth retry comes four minutes in.
-	let health = (^curl --silent --output /dev/null --write-out "%{http_code}" --connect-timeout 5 --retry 10 --retry-delay 3 --retry-max-time 30 --retry-all-errors $"($address)/health")
-	# Behind IAP the address answers with its sign-in, a redirect, to a stranger such as this.
-	let ok = if ($plan.iap? | default false) { ["200", "302"] } else { ["200"] }
+	# Behind IAP the address answers with its sign-in, a redirect, to a stranger such as this; IAP
+	# itself takes a few minutes to answer at all on a service it has just been turned on for.
+	let iap = ($plan.iap? | default false)
+	let ok = if $iap { ["200", "302"] } else { ["200"] }
+	let probe = {|| do { ^curl --silent --output /dev/null --write-out "%{http_code}" --connect-timeout 5 --retry 10 --retry-delay 3 --retry-max-time 30 --retry-all-errors $"($address)/health" } | complete | if $in.exit_code == 0 { $in.stdout | str trim } else { $"no answer \(curl ($in.exit_code)\)" } }
+	mut health = (do $probe)
+	mut waits = (if $iap { 10 } else { 0 })
+	while $health not-in $ok and $waits > 0 {
+		sleep 30sec
+		$health = (do $probe)
+		$waits -= 1
+	}
 	if $health not-in $ok { error make {msg: $"($address)/health answered ($health)"} }
 	print $"gcp: ($plan.service) is live at ($address)"
 	$pushed
