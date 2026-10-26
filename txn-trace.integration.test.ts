@@ -13,7 +13,7 @@ package test
 
 import (
   "list"
-  "bonisoft.org/plugins/pronto"
+  "github.com/bonisoft3/pronto"
 )
 
 _owned: [

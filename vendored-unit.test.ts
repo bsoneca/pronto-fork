@@ -185,7 +185,7 @@ Deno.test("the agent seat's detail grammar is the terminal's published offer", a
   const res = await cue(["export", "-", "-e", "out", "--out", "json"], `
 package test
 
-import terminal "bonisoft.org/plugins/omnishell:terminal"
+import terminal "github.com/bonisoft3/omnishell:terminal"
 
 out: terminal.#Terminal.capabilities.hatch.agent.detail
 `);

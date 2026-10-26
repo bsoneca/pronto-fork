@@ -40,10 +40,10 @@ const roster = await run("cue", ["export", "-", "-e", "out", "--out", "text"], {
 
 import (
 	"encoding/toml"
-	"bonisoft.org/plugins/pronto/distribution"
-	terminal "bonisoft.org/plugins/pronto/terminals:omnishell"
-	"bonisoft.org/plugins/pronto/clusters:mecha"
-	"bonisoft.org/plugins/pronto/builders:bayt"
+	"github.com/bonisoft3/pronto/distribution"
+	terminal "github.com/bonisoft3/pronto/terminals:omnishell"
+	"github.com/bonisoft3/pronto/clusters:mecha"
+	"github.com/bonisoft3/pronto/builders:bayt"
 )
 
 out: toml.Marshal((distribution.#Project & terminal.#Project & mecha.#Project & bayt.#Toolchain).mise)

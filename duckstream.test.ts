@@ -132,7 +132,7 @@ Deno.test("a screen that mutates an entity cannot read a cold derivation of it",
   const cueCode = `
 package test
 
-import "bonisoft.org/plugins/pronto"
+import "github.com/bonisoft3/pronto"
 
 app: pronto.#App & {
   meta: {
