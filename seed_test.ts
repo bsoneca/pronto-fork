@@ -92,7 +92,7 @@ Deno.test("a held seed cannot bypass a machine's states, and changing those stat
   const dir = await Deno.makeTempDir({ dir: "." });
   const entities = { Payment: { fields: [{ name: "id", type: "uuid" as const }, { name: "status", type: "string" as const }] } };
   const source = (states: string) => `package test
-import "bonisoft.org/plugins/pronto"
+import "github.com/bonisoft3/pronto"
 code: pronto.#App & {
   meta: {name: "held-machine", description: "test", ir: sha256: "", targets: [], clocks: [], decisions: {}, tests: {}}
   state: {

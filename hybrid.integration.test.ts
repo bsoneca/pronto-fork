@@ -262,7 +262,7 @@ Deno.test({ name: "hybrid commands serialize, replay and preserve private projec
         op: "update", schema: "public", table: "payment", values: {status: "charging"}, rawWhere: "id = game.id",
       }}];
       const declaration = await run("cue", ["export", "-", "-e", "reducer"],
-        `package proof\nimport pronto "bonisoft.org/plugins/pronto"\nreducer: (pronto.#Reducer & {machine: ${JSON.stringify(machine)}}).out\n`);
+        `package proof\nimport pronto "github.com/bonisoft3/pronto"\nreducer: (pronto.#Reducer & {machine: ${JSON.stringify(machine)}}).out\n`);
       if (!declaration.ok) throw new Error(declaration.err);
       const composed = await compileHybrid({...JSON.parse(declaration.out), name: "effect_turn"}, rules, terminal);
       const files = await emitFiles(paymentProgram());

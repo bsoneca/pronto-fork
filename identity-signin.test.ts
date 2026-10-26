@@ -9,7 +9,7 @@ import { cue, paymentProgram } from "./effects-fixtures.ts";
 // As an app embeds it: at the package's root, where `code` is the program
 // (here the fixture's `app`) and `cluster` what the app adds to its cluster.
 const signin = (settings = "") => paymentProgram()
-  .replace(`import "bonisoft.org/plugins/pronto"`, `import (\n  "bonisoft.org/plugins/pronto"\n  "bonisoft.org/plugins/pronto/identity"\n)`)
+  .replace(`import "github.com/bonisoft3/pronto"`, `import (\n  "github.com/bonisoft3/pronto"\n  "github.com/bonisoft3/pronto/identity"\n)`)
   .replace("\napp: pronto.#App & {", "\ncode: pronto.#App & {")
   .replace("capabilities: {hatches: {},", "capabilities: {auth: required: false, hatches: {},")
   .replace("_cluster: (pronto.#DefaultCluster & {code: app, statics: []}).out", "_cluster: (pronto.#DefaultCluster & {code: app, statics: []}).out & {surface: targets: cluster.surface.targets}") +

@@ -64,9 +64,9 @@ Deno.test("consumer configuration follows the emitted seats and preserves real r
       `${app}/pronto/config.cue`,
       `package consumer
 import (
-  "bonisoft.org/plugins/pronto/distribution"
-  terminal "bonisoft.org/plugins/pronto/terminals:omnishell"
-  builder "bonisoft.org/plugins/pronto/builders:bayt"
+  "github.com/bonisoft3/pronto/distribution"
+  terminal "github.com/bonisoft3/pronto/terminals:omnishell"
+  builder "github.com/bonisoft3/pronto/builders:bayt"
 )
 pronto: distribution.#Project & terminal.#Project & builder.#Toolchain
 pronto: say: say: generate: rulemap: custom: {priority: 3, cmds: [{do: "print custom"}]}

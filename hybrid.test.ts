@@ -107,7 +107,7 @@ Deno.test("a transition on the machine is taken in every state", async () => {
       go: {tier: "omnishell", payload: {type: "object", fields: {}}}}}},
   };
   const reduced = await run("cue", ["export", "-", "-e", "reducer.states"],
-    `package proof\nimport pronto "bonisoft.org/plugins/pronto"\nreducer: (pronto.#Reducer & {machine: ${JSON.stringify(machine)}}).out\n`);
+    `package proof\nimport pronto "github.com/bonisoft3/pronto"\nreducer: (pronto.#Reducer & {machine: ${JSON.stringify(machine)}}).out\n`);
   if (!reduced.ok) throw new Error(reduced.err);
   assertEquals(JSON.parse(reduced.out), {
     a: {final: false, on: {go: {target: "b"}, stop: {target: "done"}, ping: {}}},

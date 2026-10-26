@@ -6,7 +6,7 @@ async function exportCue(appCue: string): Promise<{ files: Record<string, { text
   const cueCode = `
 package test
 
-import "bonisoft.org/plugins/pronto"
+import "github.com/bonisoft3/pronto"
 
 app: pronto.#App & {
   ${appCue}
@@ -63,7 +63,7 @@ out: {
 
 async function assertCueFails(appCue: string): Promise<string> {
   const cueCode = `
-import "bonisoft.org/plugins/pronto"
+import "github.com/bonisoft3/pronto"
 
 app: pronto.#App & {
 ${appCue}

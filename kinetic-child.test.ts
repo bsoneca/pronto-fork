@@ -22,7 +22,7 @@ const google = ` --ice-servers '[{"urls":"stun:stun.l.google.com:19302"}]'`;
 const program = ({ child = actor(), markup = `<main data-live="run"><div data-kinetic="race" data-on-milestone="run"></div></main>`, targets = "[]", statics = "[]", durability = "tab" } = {}) => `
 package test
 
-import "bonisoft.org/plugins/pronto"
+import "github.com/bonisoft3/pronto"
 
 app: pronto.#App & {
   meta: {
