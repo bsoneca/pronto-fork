@@ -24,12 +24,14 @@ jobs:
       - uses: cue-lang/setup-cue@v1.0.1
         with:
           version: v0.16.1
+      # GHCR_TOKEN, a token with write:packages, when the package doesn't
+      # grant this repository's Actions write.
       - name: crane
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           curl -sSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin crane
-          echo "$GH_TOKEN" | crane auth login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$GH_TOKEN" | crane auth login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
       - name: refuse a published version
         run: |
           if crane digest "$MODULE:v$PRONTO_V" >/dev/null 2>&1; then echo "$MODULE:v$PRONTO_V is already published" >&2; exit 1; fi
