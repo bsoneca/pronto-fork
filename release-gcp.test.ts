@@ -92,7 +92,9 @@ Deno.test("initdb builds the schema once, and its re-runnable steps every releas
   assertStringIncludes(c.command[2], `if [ "$marker" = "pronto initdb" ]; then echo "initdb: already built"\n`);
   // A guard the app changed reaches a database built before it (a friend's
   // refused seat, found in production), and so does a new entity's table.
-  assertStringIncludes(c.command[2], `for step in 005_create_tables.sql 006_policies.sql 007_txid.sql 008_publication.sql 016_mecha_actors.sql`);
+  assertStringIncludes(c.command[2], `for step in 005_create_tables.sql 006_policies.sql 007_txid.sql 008_publication.sql 010_machines.sql 016_mecha_actors.sql`);
+  // A status chart the app changed reaches a live database too: 010_machines.sql is in the replay
+  // ("invalid transition on rental_request from accepting to paying", found in production).
   // Live traffic can deadlock a step (found in production); being idempotent, it runs again.
   assertStringIncludes(c.command[2], `for try in 1 2 3; do\n        if psql -v ON_ERROR_STOP=1 -Xq -f "$f"; then break; fi\n        if [ "$try" = 3 ]; then exit 1; fi`);
   // Cloud SQL's postgres is no superuser: without the roles granted, PostgREST
