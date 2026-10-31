@@ -95,8 +95,12 @@ Deno.test("initdb builds the schema once, and its re-runnable steps every releas
   assertStringIncludes(c.command[2], `for step in 005_create_tables.sql 006_policies.sql 007_txid.sql 008_publication.sql 010_machines.sql 016_mecha_actors.sql`);
   // A status chart the app changed reaches a live database too: 010_machines.sql is in the replay
   // ("invalid transition on rental_request from accepting to paying", found in production).
+  // 010 drops and recreates triggers and constraints: atomically, or a write slips between them.
+  assertStringIncludes(c.command[2], `if [ "$step" = 010_machines.sql ]; then one=--single-transaction; else one=; fi\n`);
+  assertStringIncludes(c.command[2], `if psql -v ON_ERROR_STOP=1 -Xq $one -f "$f"; then break; fi`);
   // Live traffic can deadlock a step (found in production); being idempotent, it runs again.
-  assertStringIncludes(c.command[2], `for try in 1 2 3; do\n        if psql -v ON_ERROR_STOP=1 -Xq -f "$f"; then break; fi\n        if [ "$try" = 3 ]; then exit 1; fi`);
+  assertStringIncludes(c.command[2], `for try in 1 2 3; do`);
+  assertStringIncludes(c.command[2], `if psql -v ON_ERROR_STOP=1 -Xq $one -f "$f"; then break; fi\n        if [ "$try" = 3 ]; then exit 1; fi`);
   // Cloud SQL's postgres is no superuser: without the roles granted, PostgREST
   // cannot switch into anon on the first request (found on a real instance).
   assertStringIncludes(c.command[2], "GRANT anon, app_user, service TO postgres WITH INHERIT FALSE, SET TRUE");

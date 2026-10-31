@@ -616,7 +616,10 @@ import (
 							    f=/docker-entrypoint-initdb.d/$step
 							    if [ -f "$f" ]; then echo "initdb: replaying $step"
 							      for try in 1 2 3; do
-							        if psql -v ON_ERROR_STOP=1 -Xq -f "$f"; then break; fi
+							        # 010 drops and recreates triggers and constraints: one transaction, so no
+							        # write slips between them and a failure leaves the old ones in force.
+							        if [ "$step" = 010_machines.sql ]; then one=--single-transaction; else one=; fi
+							        if psql -v ON_ERROR_STOP=1 -Xq $one -f "$f"; then break; fi
 							        if [ "$try" = 3 ]; then exit 1; fi
 							        echo "initdb: $step failed, again in 10s"; sleep 10
 							      done
