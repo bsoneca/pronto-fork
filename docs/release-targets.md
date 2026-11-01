@@ -581,7 +581,12 @@ driver passed. While they run the release also stages production: the
 project, the plan rendered with the tested digests, the bucket and the
 grants, none of it running the app; when they pass only the schema job and
 the deploy are left, the first of the release's code production runs
-([staged release](decisions/2026-10-29-staged-release.md)). `--rollback`
+([staged release](decisions/2026-10-29-staged-release.md)). The deploy takes no traffic at first: the new revision is tagged
+`candidate` and probed at its own address (`/health`, which answers the
+revision's name), traffic moves to it only once it answers, and the public
+address is then polled, three minutes at most each, until it answers as the
+new revision. If either fails, traffic goes back to the revision that served
+before and the release exits non-zero; a first deploy has none to go back to. `--rollback`
 sends the traffic back to the revision before, where its schema is the
 same. The preview is stopped whatever happened (its service, jobs
 and clock), and its Cloud SQL instance stays for the next release, which
