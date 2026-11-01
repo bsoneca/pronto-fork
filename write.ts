@@ -15,7 +15,7 @@
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stringify } from "jsr:@std/yaml@1.0.5";
-import { derive, GENERATED_HTML_HEADER, terminalPath } from "./derive.ts";
+import { derive, GENERATED_HTML_HEADER, programPackage, readApp, terminalPath } from "./derive.ts";
 import { mint } from "./identity.ts";
 import { entries, exists, ifMissing } from "./missing.ts";
 import { projectSay, projectGates } from "./project-config.ts";
@@ -467,15 +467,11 @@ if (await drawIr()) {
 console.error(`pronto write: ${emission.written.length} files emitted → ${appDir} (${derivations} derivation${derivations === 1 ? "" : "s"})`);
 
 async function drawIr(): Promise<boolean> {
-  const lift = (await derivedText()).includes("@tag(derive,") ? ["-t", "derive=true"] : [];
-  const out = await new Deno.Command("cue", {
-    args: ["export", ...lift, ".", "-e", "{program: code, ir: code.meta.ir.source}", "--out", "json"],
-    cwd: appDir,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!out.success) fail(new TextDecoder().decode(out.stderr));
-  const { program, ir } = JSON.parse(new TextDecoder().decode(out.stdout)) as { program: Program; ir: string };
+  const lifting = (await derivedText()).includes("@tag(derive,");
+  const { program, ir } = await readApp(appDir, await programPackage(appDir), lifting, "{program: app.code, ir: app.code.meta.ir.source}") as {
+    program: Program;
+    ir: string;
+  };
   const facts = JSON.parse(await Deno.readTextFile(`${appDir}/.pronto/facts.json`));
   const drawn = await renderIr(appDir, ir, program, facts);
   // ir.md beside it, the whole document as Markdown: from the author's prose and the cards both,
