@@ -648,6 +648,19 @@ sent. The build runs as the project's default Cloud Build account, which the
 release lets push to the repository and write its log; the release reads each
 digest back from the registry and names it in the service and jobs.
 
+Each image has its own key, so an edit to one service's files builds that
+image and the ones built from it, and no others. The key hashes the image's
+build record from the compose project, its Dockerfile, the files of its
+context that the Dockerfile `COPY`s (a source that is a build argument, or a
+bound mount, counts as the whole app), and, through its `service:` contexts,
+the keys of the images it is built from; it is left on the pushed image as the
+tag `src-<key>`, and a release builds only the images without one (an
+`--override`, release@k8s's release tree, keys each image by the whole app, as
+a `.dockerignore` is not read: both only ever build more). The drivers of
+`verify@gcp` are cached the same way, as `<service>-verify-<driver>:src-<key>`:
+one whose key is in the registry is pulled by digest instead of built, and the
+others are pushed once built. `PRONTO_VERIFY_NO_DRIVER_CACHE=1` builds them all.
+
 | compose | on GCP |
 |---|---|
 | database | Cloud SQL, PostgreSQL 18, `cloudsql.logical_decoding=on`; the app's database image builds the schema once as the Job `<app>-initdb`, over the socket Cloud Run mounts, and reapplies its re-runnable steps every release |
