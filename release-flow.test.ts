@@ -220,3 +220,38 @@ Deno.test("a go-live task that fails lets the others finish, then fails the rele
     assertEquals(lines.filter((l) => l.startsWith("curl") && l.includes("/health")), [], "not declared live")
   } finally { await clean(w) }
 })
+
+Deno.test("a release whose schema job is unchanged skips it; a changed job runs it before the service", async () => {
+  const w = await world()
+  try {
+    await ready(w)
+    await ledger(w, "stamp")
+    await ledger(w, "rc-stamp")
+    const first = await release(w)
+    assert(first.success, first.stderr + first.stdout)
+    const firstLines = await log(w)
+    assert(at(firstLines, /run jobs execute guestbook-initdb/) >= 0, "no live service: the job runs")
+    // The same job again, the live service carrying its hash: no job call at all.
+    await Deno.writeTextFile(w.log, "")
+    const same = await release(w)
+    assert(same.success, same.stderr + same.stdout)
+    assertStringIncludes(same.stdout, "the schema job skipped")
+    const lines = await log(w)
+    assertEquals(lines.filter((l) => /run jobs (replace|execute)/.test(l)), [], "no job call")
+    assert(at(lines, /replace .*dist\/gcp\/service.yaml is guestbook$/) >= 0, "the service is still replaced")
+    // A role added to what the job grants: the job runs, before the service.
+    await Deno.writeTextFile(`${w.app}/.pronto/cluster.json`, JSON.stringify({ server: true, tokenRoles: ["anon", "app_user", "service", "auditor"] }))
+    await Deno.writeTextFile(w.log, "")
+    const changed = await release(w)
+    assert(changed.success, changed.stderr + changed.stdout)
+    const l2 = await log(w)
+    const job = at(l2, /run jobs execute guestbook-initdb/)
+    const live = at(l2, /replace .*dist\/gcp\/service.yaml is guestbook$/)
+    assert(job >= 0 && job < live, `the job ran before the service: ${job} ${live}`)
+    // Forced, the unchanged job runs too.
+    await Deno.writeTextFile(w.log, "")
+    const forced = await release(w, { PRONTO_RELEASE_FORCE_SCHEMA: "1" })
+    assert(forced.success, forced.stderr + forced.stdout)
+    assert(at(await log(w), /run jobs execute guestbook-initdb/) >= 0)
+  } finally { await clean(w) }
+})
