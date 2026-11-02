@@ -605,6 +605,19 @@ what only the cloud has. An app without `integrate@local` is refused;
 `--no-local-gate`, or `PRONTO_RELEASE_NO_LOCAL_GATE=1`, skips the pre-gate,
 only when asked.
 
+The pre-gate runs beside the preview's emptying, the tests' build and the
+preview's deploy, its output prefixed `local-gate|`; the tests are told to run,
+and production staged, only once it passed, and a failing gate stops the deploy
+and the preview. A tree that already passed it on this machine, whether by a
+release or by `integrate@local` with `INTEGRATE_LOCAL_DRIVERS=all` run by hand,
+is not run again: the stamp is `~/.cache/pronto/local-gate/<app>/<key>`, the key
+a hash of the app's files as git lists them and of the pronto files the gate
+runs ([`gcp/local-gate-key.nu`](../gcp/local-gate-key.nu)), so any change to
+either runs it. `go-live` runs what does not depend on the rest together: the
+tagging beside the schema job, then the door's grant, the sidecars, the clock
+and the domains
+([decision](decisions/2026-11-01-release-concurrency.md)).
+
 `sayt verify@gcp` ([`gcp/verify.nu`](../gcp/verify.nu)) runs the drivers of
 `verify@<target>` against the release's address, or a preview's with
 `--preview`: every service of the app's compose project that reads `APP_URL`,

@@ -15,6 +15,7 @@
 // With INTEGRATE_LOCAL_DRIVERS=all (release@gcp's local pre-gate) the app's
 // other drivers run after the lint, each to its end, the run failing if any
 // failed: the ones its gate runs against the `rc` preview (local-drivers.ts).
+// A pass stamps the app's tree (gcp/local-gate-key.nu), which the release skips its gate for.
 
 import { localDrivers } from "./local-drivers.ts"
 
@@ -193,6 +194,14 @@ if (verdict === undefined) {
     if (failed.length > 0) {
       console.error(`integrate@local: failed: ${failed.join(", ")}`)
       verdict = 1
+    } else if (verdict === 0) {
+      // A pass stamps the tree, so release@gcp's local pre-gate skips it (gcp/local-gate-key.nu).
+      const key = new URL("./gcp/local-gate-key.nu", import.meta.url).pathname
+      const stamped = await new Deno.Command("nu", { args: [key, "stamp", appDir], stdout: "null", stderr: "inherit" }).output()
+      if (!stamped.success) {
+        console.error("integrate@local: the pass could not be stamped")
+        verdict = 1
+      }
     }
   }
 }
