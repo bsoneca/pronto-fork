@@ -233,7 +233,7 @@ if (verdict === undefined) {
     const failed: string[] = []
     for (const d of localDrivers(JSON.parse(new TextDecoder().decode(out.stdout)), url, args.omnishell)) {
       console.error(`integrate@local: ${d.name} against ${url}`)
-      const code = await run(d.cmd[0], d.cmd.slice(1), { cwd: appDir, env: { MISE_LOCKED: "0", ...d.env } })
+      const code = await run(d.cmd[0], d.cmd.slice(1), { cwd: appDir, env: { MISE_LOCKED: "0", ...ports, ...d.env } })
       console.error(`integrate@local: ${d.name} ${code === 0 ? "passed" : `FAILED (exit ${code})`}`)
       if (code !== 0) failed.push(d.name)
     }
