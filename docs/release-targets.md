@@ -614,7 +614,7 @@ is not run again: the stamp is `~/.cache/pronto/local-gate/<app>/<key>`, the key
 a hash of the app's files as git lists them and of the pronto files the gate
 runs ([`gcp/local-gate-key.nu`](../gcp/local-gate-key.nu)), so any change to
 either runs it. `go-live` runs what does not depend on the rest together: the
-tagging beside the schema job, then the door's grant, the sidecars, the clock
+retired migrate job's removal beside the service's replacement, then the door's grant, the sidecars, the clock
 and the domains
 ([decision](decisions/2026-11-01-release-concurrency.md)).
 

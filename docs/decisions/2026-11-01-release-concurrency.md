@@ -27,9 +27,7 @@ leaves room: what does not touch production can run beside what does not.
   gate run by hand before it counting. A changed or new file in the app, or
   another pronto, is another key. Files outside the app's directory are not in
   it. `--no-local-gate` is unchanged.
-- **A concurrent go-live.** The tagging of the tested images runs beside the
-  schema job (which names them by digest); the retired migrate job's removal
-  beside the service's replacement; then the door's invoker grant, each sidecar,
+- **A concurrent go-live.** The retired migrate job's removal runs beside the service's replacement; then the door's invoker grant, each sidecar,
   the clock and the domains together. The schema job still ends before the
   service is replaced, and the health check still comes last.
 - **Rendered once.** The preview's plan and production's are rendered together

@@ -490,16 +490,8 @@ def go-live [staged: record]: nothing -> record {
 	let r = $plan.region
 	let has_migrate = $staged.has_migrate
 	let number = $staged.number
-	# Tagging the tested images touches only the repository: the schema job names them by digest.
-	let first = ["tag" "schema"] | par-each --keep-order {|t|
-		if $t == "tag" {
-			{pushed: (if $staged.gated and $staged.copy != null { tag-release $staged.copy } else { $staged.pushed })}
-		} else {
-			run-job dist/gcp/job.yaml $plan.names.job (if $has_migrate { "building the schema and carrying it forward" } else { "building the schema" }) $p $r
-			{}
-		}
-	}
-	let pushed = ($first | first).pushed
+	let pushed = if $staged.gated and $staged.copy != null { tag-release $staged.copy } else { $staged.pushed }
+	run-job dist/gcp/job.yaml $plan.names.job (if $has_migrate { "building the schema and carrying it forward" } else { "building the schema" }) $p $r
 	# The service replaced beside the retired migrate job's removal (an earlier release ran it apart, this one's job does).
 	["service" "migrate"] | par-each {|t|
 		if $t == "service" {
