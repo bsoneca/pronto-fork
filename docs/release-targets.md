@@ -589,8 +589,21 @@ starts it on an empty database: making an instance is most of ten minutes.
 One release at a time, then; `--preview rc --delete` removes it all. A failing driver, or a
 preview that does not come up, stops the release there. `--preview`,
 `--dry-run` and `--snapshot` deploy as asked, untested, and `--no-gate`
-releases without the preview. A local stack (`sayt integrate@local`) is for
-development and CI.
+releases without the preview.
+
+Before any of that, a release (gated or `--no-gate`, not a preview, a dry run
+or a snapshot) runs the same drivers on the machine releasing: `release.nu`
+runs `sayt integrate@local` with `INTEGRATE_LOCAL_DRIVERS=all`, which brings the
+app up as host processes, runs the visual lint and then every other driver
+the rc gate runs (the same selection, [`local-drivers.ts`](../local-drivers.ts)),
+each from the app's directory with `APP_URL` at the local door, and fails if
+any failed. A failing scenario stops the release in about a minute with
+nothing built, pushed or deployed, where the rc gate would find it half an
+hour in. A scenario a driver skips away from localhost (a stand-in's) runs
+here, where its stand-in is. The rc gate stays after it, since a preview finds
+what only the cloud has. An app without `integrate@local` is refused;
+`--no-local-gate`, or `PRONTO_RELEASE_NO_LOCAL_GATE=1`, skips the pre-gate,
+only when asked.
 
 `sayt verify@gcp` ([`gcp/verify.nu`](../gcp/verify.nu)) runs the drivers of
 `verify@<target>` against the release's address, or a preview's with

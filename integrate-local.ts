@@ -11,6 +11,12 @@
 // surface's hostPrepare) has run before this. The browser is Playwright's
 // Chromium at the version the lint imports, installed once per host, with its
 // system libraries where the host is Linux (a CI runner).
+//
+// With INTEGRATE_LOCAL_DRIVERS=all (release@gcp's local pre-gate) the app's
+// other drivers run after the lint, each to its end, the run failing if any
+// failed: the ones its gate runs against the `rc` preview (local-drivers.ts).
+
+import { localDrivers } from "./local-drivers.ts"
 
 const args: Record<string, string> = {}
 const rest: string[] = []
@@ -28,6 +34,8 @@ if (!app || !args.omnishell || !(Number(args.settle) > 0)) {
   fail("usage: integrate-local.ts <app dir> --omnishell <omnishell dir> --settle <ms>")
 }
 const appDir = await Deno.realPath(app)
+const mode = Deno.env.get("INTEGRATE_LOCAL_DRIVERS") ?? ""
+if (mode !== "" && mode !== "all") fail(`INTEGRATE_LOCAL_DRIVERS is "${mode}": it is unset or "all"`)
 const lint = `${args.omnishell}/check-visual.ts`
 
 const run = async (cmd: string, cmdArgs: string[], opts: Deno.CommandOptions = {}) => {
@@ -170,6 +178,23 @@ if (verdict === undefined) {
     "run", "--node-modules-dir=auto", "--allow-read", "--allow-write", "--allow-net", "--allow-env", "--allow-run", "--allow-sys",
     "--unsafely-ignore-certificate-errors=localhost", lint, appDir,
   ], { cwd: dir, env: { APP_URL: url, SETTLE_TIMEOUT_MS: args.settle } })
+  if (mode === "all") {
+    // The compose project's config, read as verify.nu reads it: no daemon.
+    const out = await new Deno.Command("docker", { args: ["compose", "--profile", "*", "config", "--format", "json"], cwd: appDir, stdout: "piped" }).output()
+    if (!out.success) fail("docker compose config failed: the drivers are not known")
+    const failed: string[] = []
+    for (const d of localDrivers(JSON.parse(new TextDecoder().decode(out.stdout)), url, args.omnishell)) {
+      console.error(`integrate@local: ${d.name} against ${url}`)
+      const code = await run(d.cmd[0], d.cmd.slice(1), { cwd: appDir, env: { MISE_LOCKED: "0", ...d.env } })
+      console.error(`integrate@local: ${d.name} ${code === 0 ? "passed" : `FAILED (exit ${code})`}`)
+      if (code !== 0) failed.push(d.name)
+    }
+    if (verdict !== 0) failed.unshift("the visual lint")
+    if (failed.length > 0) {
+      console.error(`integrate@local: failed: ${failed.join(", ")}`)
+      verdict = 1
+    }
+  }
 }
 await down(verdict !== 0)
 Deno.exit(verdict)
