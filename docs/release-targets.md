@@ -618,6 +618,16 @@ tagging beside the schema job, then the door's grant, the sidecars, the clock
 and the domains
 ([decision](decisions/2026-11-01-release-concurrency.md)).
 
+Where the local gate passed for the tree, and the deploy-shaped files (release.cue,
+program.cue, compose files, `infra/`, cue.mod/module.cue, `.mise.toml`, mise.lock, pronto's
+`gcp/*.nu`) are those of a release that passed the rc gate, the release skips rc:
+no preview, no copy, its images built and staged for production as `--no-gate` does,
+and live. `~/.cache/pronto/rc-passed/<app>/<key>` records the last such pass, written
+after a gated release succeeds. `--rc` runs the rc gate anyway, and so does
+`--no-local-gate`; the log says which path and why
+([decision](decisions/2026-11-01-local-gate-replaces-rc.md)). An app's own
+rehearsal records a local pass with `nu gcp/local-gate-key.nu stamp <app dir>`.
+
 `sayt verify@gcp` ([`gcp/verify.nu`](../gcp/verify.nu)) runs the drivers of
 `verify@<target>` against the release's address, or a preview's with
 `--preview`: every service of the app's compose project that reads `APP_URL`,

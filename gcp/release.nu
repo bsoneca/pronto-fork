@@ -637,6 +637,7 @@ export def main [
 	--no-gate       # Release without testing a preview of it first
 	--rollback      # Send the release's traffic back to the revision before, where the schema is the same
 	--no-local-gate # Skip the local pre-gate (also PRONTO_RELEASE_NO_LOCAL_GATE=1); the rc gate still runs
+	--rc            # Run the rc preview gate even where the local gate passed and nothing deploy-shaped changed
 ] {
 	$env.GCP_T0 = (date now)
 	let app_info = (resolve-app $app)
@@ -650,6 +651,7 @@ export def main [
 	let snapshot = ($snapshot or (do $given SNAPSHOT))
 	let no_gate = ($no_gate or (do $given NO_GATE))
 	let rollback = ($rollback or (do $given ROLLBACK))
+	let force_rc = ($rc or (do $given RC))
 	let no_local_gate = ($no_local_gate or (do $given NO_LOCAL_GATE) or (($env.PRONTO_RELEASE_NO_LOCAL_GATE? | default "") not-in ["" "0" "false"]))
 	if $rollback { roll-back (plan-of $app_info.cue_path ""); return }
 	if $delete {
@@ -673,6 +675,17 @@ export def main [
 	# one is most of ten minutes. Each release starts it on an empty database,
 	# so one release at a time; `--preview rc --delete` removes it all.
 	let rc = "rc"
+	# The rc gate is skipped where the local gate passes, and nothing a deploy is shaped by
+	# changed since a release passed rc (docs/decisions/2026-11-01-local-gate-replaces-rc.md).
+	let deploy_key = (local-gate-key deploy-key $app_info.dir)
+	let rc_why = if $force_rc { "--rc" } else if $no_local_gate { "--no-local-gate: no local pass stands in for it" } else if $deploy_key == null { "the deploy-shaped files cannot be read" } else if not (local-gate-key rc-passed $app_info.dir $deploy_key) { "the deploy-shaped files (release.cue, compose, infra, program.cue, mise) changed since a release passed it" } else { "" }
+	if ($rc_why | is-empty) {
+		print $"gcp: (stamp) no rc preview: the deploy-shaped files are those of a release that passed it, so the local gate stands in for it \(--rc runs it\)"
+		local-gate $app_info.dir
+		deploy $app_info "" false false | ignore
+		return
+	}
+	print $"gcp: (stamp) the rc preview runs: ($rc_why)"
 	# The preview's plan and production's, rendered together; the staging below reuses them.
 	let plans = (["rc" ""] | par-each --keep-order {|v| plan-of $app_info.cue_path (if $v == "rc" { $rc } else { "" }) })
 	let rc_plan = ($plans | first)
@@ -743,6 +756,8 @@ export def main [
 		# The tests' log, read once the release is live rather than before it.
 		print $"gcp: (stamp) what the tests printed:"
 		try { drivers-log $drivers } catch {|e| print $"gcp: (stamp) the tests' log was not read: ($e.msg)" }
+		# A release the rc gate passed: the deploy-shaped files it passed with.
+		local-gate-key rc-stamp $app_info.dir $deploy_key
 		null
 	} catch {|e| $e.msg })
 	stop-preview $rc_plan
