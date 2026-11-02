@@ -612,7 +612,8 @@ def local-gate [app_dir: string] {
 	}
 	print $"gcp: (stamp) the rc gate's drivers on a local stack first \(integrate@local; --no-local-gate skips it\)"
 	try {
-		do { cd $app_dir; with-env {INTEGRATE_LOCAL_DRIVERS: "all"} { ^./saytw integrate@local o+e>| lines | each {|l| print $"local-gate| ($l)" } | ignore } }
+		# Not inside `do`/`with-env`, which swallow the failing exit the pipe raises.
+		^sh -c 'cd "$1" && INTEGRATE_LOCAL_DRIVERS=all exec ./saytw integrate@local' sh $app_dir o+e>| lines | each {|l| print $"local-gate| ($l)" } | ignore
 	} catch {|e|
 		error make {msg: $"the local pre-gate failed \(($e.msg)\): nothing reached production"}
 	}
