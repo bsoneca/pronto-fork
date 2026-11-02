@@ -581,6 +581,26 @@ def roll-back [plan: record] {
 	for svc in ($plan.names.sidecarServices? | default {} | values) { back-one $svc $plan.project $plan.region }
 }
 
+# The release's local pre-gate: the drivers its rc gate runs, run first against
+# the app as host processes (`sayt integrate@local` with INTEGRATE_LOCAL_DRIVERS=all,
+# local-drivers.ts), so a failing scenario stops the release in minutes, before
+# anything is built, pushed or deployed. The rc gate still runs after it: a
+# preview finds what only the cloud has.
+def local-gate [app_dir: string] {
+	let say = ($app_dir | path join .say.yaml)
+	let rules = (open $say | get -o say.integrate.rulemap | default {} | values | compact)
+	if not ($rules | any {|r| ($r.platform? | default "") == "local" }) {
+		error make {msg: $"($say) has no integrate@local, which the release's local pre-gate runs: add one, or release with --no-local-gate"}
+	}
+	print $"gcp: (stamp) the rc gate's drivers on a local stack first \(integrate@local; --no-local-gate skips it\)"
+	try {
+		do { cd $app_dir; with-env {INTEGRATE_LOCAL_DRIVERS: "all"} { ^./saytw integrate@local } }
+	} catch {|e|
+		error make {msg: $"the local pre-gate failed \(($e.msg)\): nothing was built, pushed or deployed"}
+	}
+	print $"gcp: (stamp) the local pre-gate passed"
+}
+
 export def main [
 	--snapshot      # Build and render only, change nothing in the project
 	--dry-run       # Print what would be applied and exit
@@ -589,6 +609,7 @@ export def main [
 	--delete        # Remove the preview, when its pull request closes
 	--no-gate       # Release without testing a preview of it first
 	--rollback      # Send the release's traffic back to the revision before, where the schema is the same
+	--no-local-gate # Skip the local pre-gate (also PRONTO_RELEASE_NO_LOCAL_GATE=1); the rc gate still runs
 ] {
 	$env.GCP_T0 = (date now)
 	let app_info = (resolve-app $app)
@@ -602,6 +623,7 @@ export def main [
 	let snapshot = ($snapshot or (do $given SNAPSHOT))
 	let no_gate = ($no_gate or (do $given NO_GATE))
 	let rollback = ($rollback or (do $given ROLLBACK))
+	let no_local_gate = ($no_local_gate or (do $given NO_LOCAL_GATE) or (($env.PRONTO_RELEASE_NO_LOCAL_GATE? | default "") not-in ["" "0" "false"]))
 	if $rollback { roll-back (plan-of $app_info.cue_path ""); return }
 	if $delete {
 		if ($preview | is-empty) { error make {msg: "--delete removes a preview: name it with --preview; a release is never deleted here"} }
@@ -613,6 +635,7 @@ export def main [
 	# the preview, then the tests, then the release of the very images tested,
 	# and the preview stopped whatever happened. A preview, a dry run or a
 	# snapshot deploys as asked.
+	if ($preview | is-empty) and not $dry_run and not $snapshot and not $no_local_gate { local-gate $app_info.dir }
 	if ($preview | is-not-empty) or $dry_run or $snapshot or $no_gate {
 		deploy $app_info $preview $dry_run $snapshot | ignore
 		return
