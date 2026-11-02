@@ -30,6 +30,13 @@ case "$args" in
   mkdir -p "$FAKE_STATE/builds"
   cp "$cfg" "$FAKE_STATE/builds/$$.yaml"
   echo "  build $FAKE_STATE/builds/$$.yaml" >> "$FAKE_LOG"
+  # An image built is new content: its digest moves with each build of its repository.
+  for ref in $(grep -o '\.tags=[^ ]*' "$cfg" | sed 's/^\.tags=//' | sort -u); do
+    g="$FAKE_STATE/gen-$(hex "${ref%:*}")"
+    echo $(( $(cat "$g" 2>/dev/null || echo 0) + 1 )) > "$g"
+    # The push moves the tag to the new image.
+    rm -f "$FAKE_STATE/tag-$(hex "$ref")"
+  done
   case "$args" in *--async*) echo "build-$$" ;; esac ;;
 *"run services describe"*"--format json"*)
   sn=$(echo "$args" | sed -E 's/.*run services describe ([^ ]+).*/\1/')
@@ -44,7 +51,7 @@ case "$args" in
   if [ -f "$FAKE_STATE/tag-$key" ]; then d=$(cat "$FAKE_STATE/tag-$key")
   else
     case "$ref" in *:src-*) echo "NOT_FOUND: $ref" >&2; exit 1 ;; esac
-    d="sha256:$(hex "digest $ref")"
+    d="sha256:$(hex "digest $ref $(cat "$FAKE_STATE/gen-$(hex "${ref%:*}")" 2>/dev/null)")"
   fi
   echo "$d" ;;
 *"artifacts docker tags add"*)

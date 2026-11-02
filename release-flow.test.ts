@@ -239,6 +239,21 @@ Deno.test("a release whose schema job is unchanged skips it; a changed job runs 
     const lines = await log(w)
     assertEquals(lines.filter((l) => /run jobs (replace|execute)/.test(l)), [], "no job call")
     assert(at(lines, /replace .*dist\/gcp\/service.yaml is guestbook$/) >= 0, "the service is still replaced")
+    // A code-only edit (another service's files): that image is built, the schema's is not, the job skipped.
+    await Deno.writeTextFile(w.log, "")
+    await Deno.writeTextFile(`${w.app}/crud/file.txt`, "code only")
+    const code = await release(w)
+    assert(code.success, code.stderr + code.stdout)
+    assertStringIncludes(code.stdout, "the schema job skipped")
+    assertEquals((await log(w)).filter((l) => /run jobs (replace|execute)/.test(l)), [], "a code-only release makes no job call")
+    // An edit to the schema image's files: it is built again, and the job runs before the service.
+    await Deno.writeTextFile(w.log, "")
+    await Deno.writeTextFile(`${w.app}/database/file.txt`, "a migration")
+    const mig = await release(w)
+    assert(mig.success, mig.stderr + mig.stdout)
+    const l1 = await log(w)
+    const j1 = at(l1, /run jobs execute guestbook-initdb/)
+    assert(j1 >= 0 && j1 < at(l1, /replace .*dist\/gcp\/service.yaml is guestbook$/), "an edited schema runs the job before the service")
     // A role added to what the job grants: the job runs, before the service.
     await Deno.writeTextFile(`${w.app}/.pronto/cluster.json`, JSON.stringify({ server: true, tokenRoles: ["anon", "app_user", "service", "auditor"] }))
     await Deno.writeTextFile(w.log, "")
