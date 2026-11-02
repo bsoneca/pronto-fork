@@ -88,7 +88,7 @@ const log = `${dir}/process-compose.log`
 const pc = (more: string[]) => ["-U", "-u", socket, "-L", log, ...more]
 // Every process of this run carries this, whatever group process-compose
 // gives it, so one it starts while it stops, which outlives it and would hold
-// the run's output open, is found and stopped (survivors(), on Linux).
+// the run's output open, is found and stopped (survivors()).
 const tag = `INTEGRATE_LOCAL_RUN=${crypto.randomUUID()}`
 const stack = new Deno.Command("process-compose", {
   args: pc(["-f", ".bayt/process-compose.yaml", "up", "--tui=false"]),
@@ -102,16 +102,37 @@ stack.status.then(() => exited = true)
 
 type Proc = { name: string; status: string; is_ready: string; exit_code: number; has_ready_probe: boolean }
 const list = async (): Promise<Proc[] | undefined> => {
-  const out = await new Deno.Command("process-compose", { args: pc(["list", "-o", "json"]), cwd: appDir, env: { MISE_LOCKED: "0" }, stdout: "piped", stderr: "null" }).output()
-  if (!out.success) return undefined
+  const out = await new Deno.Command("process-compose", { args: pc(["list", "-o", "json"]), cwd: appDir, env: { MISE_LOCKED: "0" }, stdout: "piped", stderr: "null", signal: AbortSignal.timeout(10_000) }).output().catch(() => undefined)
+  if (!out?.success) return undefined
   try {
     return JSON.parse(new TextDecoder().decode(out.stdout))
   } catch {
     return undefined
   }
 }
-// The processes still carrying this run's tag, read from /proc where there is
-// one; elsewhere none are found, and process-compose's own stop is trusted.
+// The processes of this run that outlive process-compose. On Linux, those still carrying the run's
+// tag in /proc. Elsewhere (macOS shows no environment), those seen below the stack's process while it
+// ran (`watch`, polled with the stack's readiness and once more as it goes down), which are still
+// there, running the same command: one reparented to init is found by what it was.
+const known = new Map<number, string>()
+const snapshot = async (): Promise<Map<number, { ppid: number; command: string }>> => {
+  const ps = await new Deno.Command("ps", { args: ["-axo", "pid=,ppid=,command="], stdout: "piped", stderr: "null" }).output()
+  const all = new Map<number, { ppid: number; command: string }>()
+  for (const line of new TextDecoder().decode(ps.stdout).split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)
+    if (m) all.set(Number(m[1]), { ppid: Number(m[2]), command: m[3] })
+  }
+  return all
+}
+const watch = async () => {
+  const all = await snapshot()
+  const below = new Set([stack.pid])
+  for (let grew = true; grew;) {
+    grew = false
+    for (const [pid, p] of all) if (!below.has(pid) && below.has(p.ppid)) { below.add(pid); grew = true }
+  }
+  for (const pid of below) if (pid !== stack.pid && pid !== Deno.pid) known.set(pid, all.get(pid)!.command)
+}
 const survivors = async (): Promise<number[]> => {
   const found: number[] = []
   try {
@@ -121,21 +142,28 @@ const survivors = async (): Promise<number[]> => {
       const env = await Deno.readFile(`/proc/${pid}/environ`).catch(() => undefined)
       if (env && new TextDecoder().decode(env).split("\0").includes(tag)) found.push(pid)
     }
+    return found
   } catch { /* no /proc */ }
+  const all = await snapshot()
+  for (const [pid, command] of known) if (all.get(pid)?.command === command) found.push(pid)
   return found
 }
 const settled = (ms: number) => Promise.race([stack.status.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(exited), ms))])
+// Whatever process-compose says or fails to say, this returns within about a minute with nothing
+// of the run left: its `down` is given 20 s, then it is terminated, then killed, then whatever
+// still carries the run's tag.
 const down = async (failed: boolean) => {
   if (failed) {
     const text = await Deno.readTextFile(log).catch(() => "")
     console.error(`integrate@local: process-compose's log, last lines:\n${text.split("\n").slice(-60).join("\n")}`)
   }
-  await new Deno.Command("process-compose", { args: pc(["down"]), cwd: appDir, env: { MISE_LOCKED: "0" }, stdout: "null", stderr: "null" }).output()
-  // A stack that does not stop when asked is stopped, never waited on.
-  if (!await settled(60_000)) {
-    console.error("integrate@local: process-compose did not stop in a minute; terminating it")
+  await watch().catch(() => {})
+  await new Deno.Command("process-compose", { args: pc(["down"]), cwd: appDir, env: { MISE_LOCKED: "0" }, stdout: "null", stderr: "null", signal: AbortSignal.timeout(20_000) }).output()
+    .catch(() => console.error("integrate@local: process-compose's down did not answer in 20 s"))
+  if (!await settled(20_000)) {
+    console.error("integrate@local: process-compose did not stop; terminating it")
     stack.kill("SIGTERM")
-    if (!await settled(30_000)) stack.kill("SIGKILL")
+    if (!await settled(10_000)) stack.kill("SIGKILL")
   }
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
     const left = await survivors()
@@ -148,6 +176,8 @@ const down = async (failed: boolean) => {
     }
     await new Promise((r) => setTimeout(r, 5000))
   }
+  const left = await survivors()
+  if (left.length > 0) console.error(`integrate@local: ${left.length} processes survive the run: ${left.join(", ")}`)
   await Deno.remove(dir, { recursive: true }).catch(() => {})
 }
 
@@ -166,6 +196,7 @@ for (;;) {
     verdict = 1
     break
   }
+  await watch().catch(() => {})
   const procs = await list()
   if (procs) {
     const failed = procs.find((p) => (p.status === "Completed" && p.exit_code !== 0) || p.status === "Error" || p.status === "Skipped")
