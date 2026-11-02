@@ -10,7 +10,7 @@ const fork = new URL(".", import.meta.url).pathname.replace(/\/$/, "")
 const decoder = new TextDecoder()
 const PROD = /--project brawl-chess( |$)/
 const RC = /--project brawl-chess-previews( |$)/
-const services = ["database", "crud", "electric", "auth", "caddy"]
+const services = ["database", "crud", "electric", "auth", "caddy", "billing", "worker"]
 
 type World = { root: string; app: string; home: string; fakes: string; state: string; log: string }
 
@@ -33,7 +33,7 @@ async function world(): Promise<World> {
   await new Deno.Command("cp", { args: ["-R", `${fork}/resilience`, `${root}/resilience`] }).output()
   await write(`${app}/release.cue`, `package app
 import "github.com/bonisoft3/pronto/gcp/schema"
-GCP: schema.#Release & {name: "guestbook", project: "brawl-chess", previewProject: "brawl-chess-previews", region: "us-central1"}
+GCP: schema.#Release & {name: "guestbook", project: "brawl-chess", previewProject: "brawl-chess-previews", region: "us-central1", sidecars: {billing: {port: 8688, apart: {}}, worker: {port: 8689, apart: {}}}}
 gcpRelease: schema.#Build & {release: GCP}
 `)
   await write(`${app}/.pronto/cluster.json`, JSON.stringify({ server: true, tokenRoles: ["anon", "app_user", "service"] }))
@@ -203,4 +203,20 @@ Deno.test("a heredoc opens at a RUN, COPY or ADD only, not at a shell's shift", 
   const out = await new Deno.Command("nu", { args: ["-c", `source ${fork}/gcp/build.nu; dockerfile-reads ${JSON.stringify(dockerfile)} | to json --raw`], stdout: "piped", stderr: "piped" }).output()
   assert(out.success, decoder.decode(out.stderr))
   assertEquals(JSON.parse(decoder.decode(out.stdout)), ["a", "b"])
+})
+
+Deno.test("a go-live task that fails lets the others finish, then fails the release", async () => {
+  const w = await world()
+  try {
+    await ready(w)
+    await ledger(w, "stamp")
+    await ledger(w, "rc-stamp")
+    const r = await release(w, { FAKE_FAIL: "services replace dist/gcp/sidecar-billing.yaml" })
+    assert(!r.success)
+    assertStringIncludes(r.stderr, "sidecar-billing.yaml")
+    const lines = await log(w)
+    assert(at(lines, /replace .*sidecar-worker.yaml is /) >= 0, "the other sidecar was still made")
+    assert(at(lines, /add-iam-policy-binding guestbook --region .* --member allUsers/) >= 0, "the door's grant was still made")
+    assertEquals(lines.filter((l) => l.startsWith("curl") && l.includes("/health")), [], "not declared live")
+  } finally { await clean(w) }
 })

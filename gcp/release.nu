@@ -615,7 +615,7 @@ def local-gate [app_dir: string] {
 		error make {msg: $"($say) has no integrate@local, which the release's local pre-gate runs: add one, or release with --no-local-gate"}
 	}
 	let key = (local-gate-key key $app_dir)
-	if $key != null and (local-gate-key passed $app_dir) {
+	if $key != null and (local-gate-key passed $app_dir $key) {
 		print $"gcp: (stamp) the local pre-gate skipped: this tree passed it on this machine already \(~/.cache/pronto/local-gate\)"
 		return
 	}

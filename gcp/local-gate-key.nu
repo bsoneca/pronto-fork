@@ -47,7 +47,13 @@ def tree-key [app_dir: string, keep: closure, own: list<string>]: nothing -> any
 	let hashed = ($files | each {|f| $dir | path join $f } | str join (char nl) | do { ^git -C $dir hash-object --stdin-paths } | complete)
 	if $hashed.exit_code != 0 { return null }
 	let theirs = ($own | each {|f| open --raw ($pronto | path join $f) | hash sha256 })
-	[...$names ...($hashed.stdout | lines) ...$theirs] | str join (char nl) | hash sha256
+	# The tools' pins (sayt, omnishell and its visual lint, mise's) above the app, where the app's
+	# own are not the repository's.
+	let top = (^git -C $dir rev-parse --show-toplevel | str trim)
+	let pins = if $top == $dir { [] } else {
+		["mise.lock" ".mise.toml" "mise.toml"] | each {|f| $top | path join $f } | where {|f| $f | path exists } | each {|f| open --raw $f | hash sha256 }
+	}
+	[...$names ...($hashed.stdout | lines) ...$theirs ...$pins] | str join (char nl) | hash sha256
 }
 
 # The local gate's key of the tree as it stands, or null where git cannot read it (no ledger then).
@@ -71,8 +77,8 @@ def record [app_dir: string, kind: string, k: any] {
 	(date now | format date "%+") | save -f (ledger $app_dir $kind | path join $k)
 }
 
-# Whether this tree passed the local gate on this machine.
-export def passed [app_dir: string]: nothing -> bool { seen $app_dir local-gate (key $app_dir) }
+# Whether this tree passed the local gate on this machine (the key given, else the tree's).
+export def passed [app_dir: string, k?: string]: nothing -> bool { seen $app_dir local-gate ($k | default (key $app_dir)) }
 
 # The stamp of a local pass, for the tree whose key is given (taken before the gate ran).
 export def stamp [app_dir: string, k?: string] { record $app_dir local-gate ($k | default (key $app_dir)) }

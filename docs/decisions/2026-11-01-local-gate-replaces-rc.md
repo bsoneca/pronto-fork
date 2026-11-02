@@ -43,7 +43,8 @@ live), after the local gate.
 
 What rc would find that no file in that list explains: a base image that moved under a floating
 tag, a Cloud-only environment value, a quota, a grant changed in the project by hand, a file the
-list does not name that an image reads (a config under a name the patterns miss). `--rc` is for
+list does not name that an image reads (a config under a name the patterns miss), and a
+floating `FROM` tag (unpinned base images), which no file of the app reveals. `--rc` is for
 them. Stamps are per machine. A pass is recorded for the tree as it was before the gate ran, and
 only if it is unchanged after; a tree whose key cannot be read is never recorded.
 
@@ -53,3 +54,5 @@ only if it is unchanged after; a tree whose key cannot be read is never recorded
 keys; `passed` and `rc-passed` print true or false; `stamp` records a local pass
 for the tree as it stands (what an app's rehearsal calls after a full pass);
 `rc-stamp` records an rc pass.
+
+Both keys also hash the tool pins (mise.lock, .mise.toml: sayt, omnishell and its visual lint) of the app and of the repository above it.

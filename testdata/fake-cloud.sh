@@ -13,6 +13,8 @@ docker)
   case "$args" in *"config --format json"*) cat "$FAKE_COMPOSE" ;; esac
   exit 0 ;;
 esac
+# A call made to fail, by the pattern in $FAKE_FAIL.
+if [ -n "$FAKE_FAIL" ] && echo "$args" | grep -Eq "$FAKE_FAIL"; then echo "fake failure: $args" >&2; exit 1; fi
 hex() { printf %s "$1" | shasum -a 256 | cut -d' ' -f1; }
 case "$args" in
 *"run services replace"*)
