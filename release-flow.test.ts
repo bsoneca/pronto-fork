@@ -41,6 +41,7 @@ gcpRelease: schema.#Build & {release: GCP}
   await write(`${app}/saytw`, `#!/bin/sh
 echo "saytw $* drivers=$INTEGRATE_LOCAL_DRIVERS start" >> "$FAKE_LOG"
 sleep "\${FAKE_GATE_SLEEP:-0}"
+[ -z "$FAKE_GATE_TOUCH" ] || echo changed >> "$FAKE_GATE_TOUCH"
 if [ -n "$FAKE_GATE_FAIL" ]; then echo "saytw end FAILED" >> "$FAKE_LOG"; echo "scenario failed" >&2; exit 1; fi
 echo "saytw end" >> "$FAKE_LOG"
 `)
@@ -169,4 +170,37 @@ Deno.test("a second release builds only the image whose files changed", async ()
     for (const s of services.filter((s) => s !== "crud")) assert(!again.includes(`${s}.tags=`), `${s} was built again`)
     assertStringIncludes(second.stdout, "reusing")
   } finally { await clean(w) }
+})
+
+Deno.test("a deploy-shaped file of an image (a Dockerfile) runs the rc preview though the gate passed", async () => {
+  const w = await world()
+  try {
+    await ready(w)
+    await ledger(w, "stamp")
+    await ledger(w, "rc-stamp")
+    await Deno.writeTextFile(`${w.app}/docker/crud.Dockerfile`, "FROM scratch\nCOPY crud/ /other\n")
+    const r = await release(w)
+    assert(r.success, r.stderr + r.stdout)
+    assertStringIncludes(r.stdout, "the rc preview runs")
+    assert(at(await log(w), RC) >= 0)
+  } finally { await clean(w) }
+})
+
+Deno.test("a tree that changed while the gate ran is not recorded as passed", async () => {
+  const w = await world()
+  try {
+    await ready(w)
+    await ledger(w, "rc-stamp")
+    const r = await release(w, { FAKE_GATE_TOUCH: "crud/file.txt" })
+    assert(r.success, r.stderr + r.stdout)
+    assertStringIncludes(r.stdout, "changed during the run")
+    assertEquals((await ledger(w, "passed")).stdout.trim(), "false")
+  } finally { await clean(w) }
+})
+
+Deno.test("a heredoc opens at a RUN, COPY or ADD only, not at a shell's shift", async () => {
+  const dockerfile = "FROM x\nENV A=$((1<<2))\nCOPY a /a\nRUN <<EOF\nCOPY inside /x\nEOF\nCOPY b /b\n"
+  const out = await new Deno.Command("nu", { args: ["-c", `source ${fork}/gcp/build.nu; dockerfile-reads ${JSON.stringify(dockerfile)} | to json --raw`], stdout: "piped", stderr: "piped" }).output()
+  assert(out.success, decoder.decode(out.stderr))
+  assertEquals(JSON.parse(decoder.decode(out.stdout)), ["a", "b"])
 })

@@ -27,20 +27,25 @@ when both hold:
 - its deploy-shaped key has a stamp (`~/.cache/pronto/rc-passed/<app>/<key>`),
   written only after a release that ran rc succeeded.
 
-The deploy-shaped key hashes `release.cue`, `program.cue`, `cue.mod/module.cue`,
-`.mise.toml`, `mise.lock`, `compose*.yaml` and `.bayt/compose*.yaml`, `infra/`,
-and pronto's `gcp/*.nu` and `plugin.json`. (Sidecars are declared in
-release.cue and compose; `program.cue` is taken whole, its release and target
-sections not being separable.) Any change to one runs rc, and so does
-`--rc`, `--no-local-gate` (nothing then stands in for it), and a first release.
-The log says which path was taken and why. The skipped path is `--no-gate`'s
-(stage, images built in Cloud Build, go live), after the local gate.
+The deploy-shaped key hashes what the local gate never exercises, since it runs host
+processes, not the images or the service Cloud Run renders: `release.cue`, `program.cue`,
+`cue.mod/module.cue`, `.mise.toml`, `mise.lock`, `.say.yaml`, `.pronto/cluster.json`,
+`compose*.yaml` and `.bayt/compose*.yaml`, `infra/`, every Dockerfile (`*Dockerfile*`,
+`docker/`), the web server's, entrypoints' and sidecars' files (`Caddyfile*`, `nginx*.conf`,
+`*entrypoint*`, `sidecar/`), and pronto's `gcp/*.nu` and `plugin.json`. Database migrations are
+not in it: the local gate runs them on postgres. (`program.cue` is taken whole, its release and
+target sections not being separable.) Any change to one runs rc, and so does `--rc`,
+`--no-local-gate` (nothing then stands in for it), and a first release. The log says which path
+was taken and why. The skipped path is `--no-gate`'s (stage, images built in Cloud Build, go
+live), after the local gate.
 
 ## Not covered
 
-A change outside those files that behaves differently only in the cloud (an
-image's base, a Cloud-only environment) is not seen until a release that runs
-rc; `--rc` is for it. Stamps are per machine.
+What rc would find that no file in that list explains: a base image that moved under a floating
+tag, a Cloud-only environment value, a quota, a grant changed in the project by hand, a file the
+list does not name that an image reads (a config under a name the patterns miss). `--rc` is for
+them. Stamps are per machine. A pass is recorded for the tree as it was before the gate ran, and
+only if it is unchanged after; a tree whose key cannot be read is never recorded.
 
 ## Interface
 

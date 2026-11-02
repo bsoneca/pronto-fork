@@ -493,14 +493,18 @@ def go-live [staged: record]: nothing -> record {
 	let pushed = if $staged.gated and $staged.copy != null { tag-release $staged.copy } else { $staged.pushed }
 	run-job dist/gcp/job.yaml $plan.names.job (if $has_migrate { "building the schema and carrying it forward" } else { "building the schema" }) $p $r
 	# The service replaced beside the retired migrate job's removal (an earlier release ran it apart, this one's job does).
-	["service" "migrate"] | par-each {|t|
-		if $t == "service" {
-			print $"gcp: (stamp) deploying ($plan.service)"
-			gc run services replace dist/gcp/service.yaml --region $r --project $p | ignore
-		} else if (exists run jobs describe $plan.names.migrateJob --region $r --project $p) {
-			gc run jobs delete $plan.names.migrateJob --region $r --project $p | ignore
-		}
-	} | ignore
+	let failed = (["service" "migrate"] | par-each {|t|
+		try {
+			if $t == "service" {
+				print $"gcp: (stamp) deploying ($plan.service)"
+				gc run services replace dist/gcp/service.yaml --region $r --project $p | ignore
+			} else if (exists run jobs describe $plan.names.migrateJob --region $r --project $p) {
+				gc run jobs delete $plan.names.migrateJob --region $r --project $p | ignore
+			}
+			null
+		} catch {|e| $e.msg }
+	} | compact)
+	if ($failed | is-not-empty) { error make {msg: ($failed | str join "\n") } }
 	# What follows the door being up is independent: its invoker grant, each sidecar, the
 	# ticker's clock and the domains, all at once. Each sidecar apart, once the door it reaches
 	# the gateway through is up; public as the door is, which dials it. They and the ticker's
@@ -508,31 +512,36 @@ def go-live [staged: record]: nothing -> record {
 	let sidecars = ($plan.sidecarServicesYaml | columns | each {|s| {sidecar: $s} })
 	let clock = if ($plan.clock? | is-not-empty) { [{clock: $plan.clock}] } else { [] }
 	let domains = ([$plan.domain?] | compact | append $plan.aliases | each {|d| {domain: $d} })
-	[{door: true}] | append $sidecars | append $clock | append $domains | par-each {|t|
-		if ($t.door? | default false) {
-			if ($plan.iap? | default false) {
-				# Behind Identity-Aware Proxy only IAP's own agent invokes the service, and
-				# only the people the owner admits reach it: nobody else at all.
-				gc services enable iap.googleapis.com --project $p | ignore
-				# IAP's service agent, made once a project (gcloud has it only in beta).
-				let token = (gc auth print-access-token | str trim)
-				^curl --silent --fail --show-error --output /dev/null -X POST -H $"Authorization: Bearer ($token)" $"https://serviceusage.googleapis.com/v1beta1/projects/($number)/services/iap.googleapis.com:generateServiceIdentity"
-				gc run services add-iam-policy-binding $plan.service --region $r --project $p --member $"serviceAccount:service-($number)@gcp-sa-iap.iam.gserviceaccount.com" --role roles/run.invoker | ignore
-				do { ^gcloud --quiet run services remove-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker } | complete | ignore
+	# Each runs to its end, whatever the others answer; the release fails after, with every error.
+	let failed = ([{door: true}] | append $sidecars | append $clock | append $domains | par-each {|t|
+		try {
+			if ($t.door? | default false) {
+				if ($plan.iap? | default false) {
+					# Behind Identity-Aware Proxy only IAP's own agent invokes the service, and
+					# only the people the owner admits reach it: nobody else at all.
+					gc services enable iap.googleapis.com --project $p | ignore
+					# IAP's service agent, made once a project (gcloud has it only in beta).
+					let token = (gc auth print-access-token | str trim)
+					^curl --silent --fail --show-error --output /dev/null -X POST -H $"Authorization: Bearer ($token)" $"https://serviceusage.googleapis.com/v1beta1/projects/($number)/services/iap.googleapis.com:generateServiceIdentity"
+					gc run services add-iam-policy-binding $plan.service --region $r --project $p --member $"serviceAccount:service-($number)@gcp-sa-iap.iam.gserviceaccount.com" --role roles/run.invoker | ignore
+					do { ^gcloud --quiet run services remove-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker } | complete | ignore
+				} else {
+					gc run services add-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker | ignore
+				}
+			} else if ($t.domain? | is-not-empty) {
+				map-domain $t.domain $plan.service $p $r
+			} else if ($t.clock? | is-not-empty) {
+				ensure-clock $t.clock (gc secrets versions access latest --secret $plan.names.secrets.SERVICE_JWT --project $p) $p $r
 			} else {
-				gc run services add-iam-policy-binding $plan.service --region $r --project $p --member allUsers --role roles/run.invoker | ignore
+				let svc = ($plan.names.sidecarServices | get $t.sidecar)
+				print $"gcp: (stamp) ($t.sidecar) apart \(($svc)\)"
+				gc run services replace $"dist/gcp/sidecar-($t.sidecar).yaml" --region $r --project $p | ignore
+				gc run services add-iam-policy-binding $svc --region $r --project $p --member allUsers --role roles/run.invoker | ignore
 			}
-		} else if ($t.domain? | is-not-empty) {
-			map-domain $t.domain $plan.service $p $r
-		} else if ($t.clock? | is-not-empty) {
-			ensure-clock $t.clock (gc secrets versions access latest --secret $plan.names.secrets.SERVICE_JWT --project $p) $p $r
-		} else {
-			let svc = ($plan.names.sidecarServices | get $t.sidecar)
-			print $"gcp: (stamp) ($t.sidecar) apart \(($svc)\)"
-			gc run services replace $"dist/gcp/sidecar-($t.sidecar).yaml" --region $r --project $p | ignore
-			gc run services add-iam-policy-binding $svc --region $r --project $p --member allUsers --role roles/run.invoker | ignore
-		}
-	} | ignore
+			null
+		} catch {|e| $e.msg }
+	} | compact)
+	if ($failed | is-not-empty) { error make {msg: ($failed | str join "\n") } }
 
 	let address = $"https://($plan.service)-($number).($r).run.app"
 	# Live means the address answers, not that gcloud returned, which waits for
@@ -611,14 +620,24 @@ def local-gate [app_dir: string] {
 		return
 	}
 	print $"gcp: (stamp) the rc gate's drivers on a local stack first \(integrate@local; --no-local-gate skips it\)"
-	try {
-		# Not inside `do`/`with-env`, which swallow the failing exit the pipe raises.
-		^sh -c 'cd "$1" && INTEGRATE_LOCAL_DRIVERS=all exec ./saytw integrate@local' sh $app_dir o+e>| lines | each {|l| print $"local-gate| ($l)" } | ignore
-	} catch {|e|
-		error make {msg: $"the local pre-gate failed \(($e.msg)\): nothing reached production"}
+	# The verdict is the exit the shell prints as the stream's last line, not what the pipe
+	# raises: a gate with no `gate-exit 0` line failed, whatever else happened.
+	let out = (try {
+		^sh -c '( cd "$1" && INTEGRATE_LOCAL_DRIVERS=all ./saytw integrate@local ); echo "@@gate-exit $?"' sh $app_dir o+e>| lines | each {|l| if not ($l starts-with "@@gate-exit ") { print $"local-gate| ($l)" }; $l }
+	} catch {|e| [$"@@gate-exit pipe: ($e.msg)"] })
+	let verdict = ($out | where {|l| $l starts-with "@@gate-exit " } | last 1 | get -o 0 | default "@@gate-exit none")
+	if $verdict != "@@gate-exit 0" {
+		error make {msg: $"the local pre-gate failed \(($verdict | str replace '@@gate-exit ' 'exit ')\): nothing reached production"}
 	}
-	local-gate-key stamp $app_dir $key
-	print $"gcp: (stamp) the local pre-gate passed"
+	# Stamped only for a tree whose key was read, and is the same after the run.
+	if $key == null {
+		print $"gcp: (stamp) the local pre-gate passed; the tree's key cannot be read, so the pass is not recorded"
+	} else if (local-gate-key key $app_dir) != $key {
+		print $"gcp: (stamp) the local pre-gate passed; the tree changed during the run, so the pass is not recorded"
+	} else {
+		local-gate-key stamp $app_dir $key
+		print $"gcp: (stamp) the local pre-gate passed"
+	}
 }
 
 export def main [
@@ -719,6 +738,14 @@ export def main [
 			if "gate" in $m {
 				if $m.gate != null {
 					try { job kill $deploy_job }
+					# What it sent before it was killed may be queued still: the tests' build is cancelled
+					# whenever it was submitted. (An image build the deploy had submitted runs on to its
+					# end, nobody waiting for it.)
+					loop {
+						let q = (try { job recv --timeout 200ms } catch { null })
+						if $q == null { break }
+						if ($q.drivers? | is-not-empty) { $drivers = $q.drivers }
+					}
 					if $drivers != null { cancel-drivers $drivers }
 					error make {msg: $m.gate}
 				}

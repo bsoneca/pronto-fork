@@ -39,6 +39,17 @@ const mode = Deno.env.get("INTEGRATE_LOCAL_DRIVERS") ?? ""
 if (mode !== "" && mode !== "all") fail(`INTEGRATE_LOCAL_DRIVERS is "${mode}": it is unset or "all"`)
 const lint = `${args.omnishell}/check-visual.ts`
 
+// The release's pass ledger (gcp/local-gate-key.nu): the tree's key, taken before the stack starts.
+const gateKey = async (verb: string, key?: string) => {
+  const script = new URL("./gcp/local-gate-key.nu", import.meta.url).pathname
+  const out = await new Deno.Command("nu", { args: [script, verb, appDir, ...(key ? [key] : [])], stdout: "piped", stderr: "inherit" }).output()
+  return { success: out.success, text: new TextDecoder().decode(out.stdout).trim() }
+}
+const treeKey = async () => {
+  const r = await gateKey("key")
+  return r.success ? r.text : ""
+}
+
 const run = async (cmd: string, cmdArgs: string[], opts: Deno.CommandOptions = {}) => {
   const { code } = await new Deno.Command(cmd, { args: cmdArgs, stdout: "inherit", stderr: "inherit", ...opts }).output()
   return code
@@ -49,6 +60,8 @@ const playwright = (await Deno.readTextFile(lint)).match(/npm:playwright@([0-9.]
   fail(`${lint} names no npm:playwright version`)
 const install = ["run", "-A", `npm:playwright@${playwright}`, "install", ...(Deno.build.os === "linux" ? ["--with-deps"] : []), "chromium"]
 if (await run(Deno.execPath(), install) !== 0) fail(`playwright ${playwright} could not install chromium`)
+
+const before = mode === "all" ? await treeKey() : ""
 
 // Every port the stack binds, moved to one free now: a launch@local of the
 // same app holds the project's own defaults, and a check reaching that
@@ -195,10 +208,11 @@ if (verdict === undefined) {
       console.error(`integrate@local: failed: ${failed.join(", ")}`)
       verdict = 1
     } else if (verdict === 0) {
-      // A pass stamps the tree, so release@gcp's local pre-gate skips it (gcp/local-gate-key.nu).
-      const key = new URL("./gcp/local-gate-key.nu", import.meta.url).pathname
-      const stamped = await new Deno.Command("nu", { args: [key, "stamp", appDir], stdout: "null", stderr: "inherit" }).output()
-      if (!stamped.success) {
+      // A pass stamps the tree as it was before the run, if it still is (gcp/local-gate-key.nu).
+      const after = await treeKey()
+      if (!before || before !== after) {
+        console.error(`integrate@local: ${before ? "the tree changed during the run" : "the tree's key cannot be read"}: the pass is not recorded`)
+      } else if (!(await gateKey("stamp", before)).success) {
         console.error("integrate@local: the pass could not be stamped")
         verdict = 1
       }

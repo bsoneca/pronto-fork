@@ -82,10 +82,13 @@ def dockerfile-reads [text: string]: nothing -> any {
 		let l = ($raw | str trim)
 		# A heredoc's body is the Dockerfile's own text.
 		if $end != "" { if $l == $end { $end = "" }; continue }
-		let tag = ($l | parse -r "<<-?['\"]?(?<tag>\\w+)")
-		if ($tag | is-not-empty) { $end = ($tag | first | get tag) }
 		let words = ($l | split row -r '\s+')
 		let kw = ($words | first)
+		# Only a RUN, COPY or ADD opens a heredoc, by a `<<` that starts a word (not a shell's `$((1<<2))`).
+		if ($kw =~ '(?i)^(RUN|COPY|ADD)$') {
+			let tag = ($l | parse -r "(?:^|\\s)<<-?['\"]?(?<tag>\\w+)")
+			if ($tag | is-not-empty) { $end = ($tag | first | get tag) }
+		}
 		if ($kw =~ '(?i)^RUN$') {
 			let binds = ($words | where {|w| $w starts-with "--mount=" and ($w | str contains "type=bind") and not ($w | str contains "from=") })
 			if ($binds | is-not-empty) { return null }
