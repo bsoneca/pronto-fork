@@ -605,6 +605,30 @@ what only the cloud has. An app without `integrate@local` is refused;
 `--no-local-gate`, or `PRONTO_RELEASE_NO_LOCAL_GATE=1`, skips the pre-gate,
 only when asked.
 
+The pre-gate runs beside the preview's emptying, the tests' build and the
+preview's deploy, its output prefixed `local-gate|`; the tests are told to run,
+and production staged, only once it passed, and a failing gate stops the deploy
+and the preview. A tree that already passed it on this machine, whether by a
+release or by `integrate@local` with `INTEGRATE_LOCAL_DRIVERS=all` run by hand,
+is not run again: the stamp is `~/.cache/pronto/local-gate/<app>/<key>`, the key
+a hash of the app's files as git lists them and of the pronto files the gate
+runs ([`gcp/local-gate-key.nu`](../gcp/local-gate-key.nu)), so any change to
+either runs it. `go-live` runs what does not depend on the rest together: the
+retired migrate job's removal beside the service's replacement, then the door's grant, the sidecars, the clock
+and the domains
+([decision](decisions/2026-11-01-release-concurrency.md)).
+
+Where the local gate passed for the tree, and the deploy-shaped files (release.cue,
+program.cue, compose files, Dockerfiles and `docker/`, web server, entrypoint and sidecar files,
+`.say.yaml`, `.pronto/cluster.json`, `infra/`, cue.mod/module.cue, `.mise.toml`, mise.lock, pronto's
+`gcp/*.nu`; not database migrations, which the local gate runs) are those of a release that passed the rc gate, the release skips rc:
+no preview, no copy, its images built and staged for production as `--no-gate` does,
+and live. `~/.cache/pronto/rc-passed/<app>/<key>` records the last such pass, written
+after a gated release succeeds. `--rc` runs the rc gate anyway, and so does
+`--no-local-gate`; the log says which path and why
+([decision](decisions/2026-11-01-local-gate-replaces-rc.md)). An app's own
+rehearsal records a local pass with `nu gcp/local-gate-key.nu stamp <app dir>`.
+
 `sayt verify@gcp` ([`gcp/verify.nu`](../gcp/verify.nu)) runs the drivers of
 `verify@<target>` against the release's address, or a preview's with
 `--preview`: every service of the app's compose project that reads `APP_URL`,
@@ -624,6 +648,19 @@ app's images is its own directory or an image by digest, so nothing else is
 sent. The build runs as the project's default Cloud Build account, which the
 release lets push to the repository and write its log; the release reads each
 digest back from the registry and names it in the service and jobs.
+
+Each image has its own key, so an edit to one service's files builds that
+image and the ones built from it, and no others. The key hashes the image's
+build record from the compose project, its Dockerfile, the files of its
+context that the Dockerfile `COPY`s (a source that is a build argument, or a
+bound mount, counts as the whole app), and, through its `service:` contexts,
+the keys of the images it is built from; it is left on the pushed image as the
+tag `src-<key>`, and a release builds only the images without one (an
+`--override`, release@k8s's release tree, keys each image by the whole app, as
+a `.dockerignore` is not read: both only ever build more). The drivers of
+`verify@gcp` are cached the same way, as `<service>-verify-<driver>:src-<key>`:
+one whose key is in the registry is pulled by digest instead of built, and the
+others are pushed once built. `PRONTO_VERIFY_NO_DRIVER_CACHE=1` builds them all.
 
 | compose | on GCP |
 |---|---|
