@@ -3888,6 +3888,8 @@ _traceHeader: include_patterns: ["^traceparent$"]
 				    }
 				    handle @renderdown {
 				      root * /srv
+				      request_header -If-Match
+				      request_header -If-Unmodified-Since
 				      request_header -If-None-Match
 				      request_header -If-Modified-Since
 				      request_header -If-Range
