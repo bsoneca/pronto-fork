@@ -513,11 +513,14 @@ import (
 	let sidecarOf = {
 		n: string
 		c: _
+		// A service's own container (a sidecar apart): Cloud Run sets its PORT from
+		// its containerPort and refuses a revision that names PORT itself.
+		ingress: *false | bool
 		out: {
 			name: n
 			image: (imageOf & {svc: n}).out
 			if len(c.env)+len(c.secrets) > 0 {
-				env: list.Concat([[for k, v in c.env if c.secrets[k] == _|_ {[
+				env: list.Concat([[for k, v in c.env if c.secrets[k] == _|_ if !ingress || k != "PORT" {[
 					if sq[k] != _|_ {(secretOf & {env: k, secret: sq[k]}).out},
 					if k == "ORIGIN" && R._origin != "" {{name: k, value: R._origin}},
 					{name: k, value: v},
@@ -569,7 +572,7 @@ import (
 						volumes: [{name: "gmp-config", secret: {secretName: R.names.sidecarScrapeConfigs[n], items: [{key: "latest", path: "config.yaml"}]}}]
 					}
 					containers: list.Concat([[{
-						(sidecarOf & {"n": n, "c": c}).out
+						(sidecarOf & {"n": n, "c": c, ingress: true}).out
 						ports: [{name: "http1", containerPort: c.port}]
 						if c.memory != _|_ {resources: limits: memory: c.memory}
 						if c.apart.cpu != _|_ {resources: limits: cpu: "\(c.apart.cpu)m"}
@@ -779,6 +782,7 @@ import (
 		if len(R._sidecarClashes) > 0 {sidecarPorts: error("GCP.sidecars listen on \(strings.Join(R._sidecarClashes, ", "))")}
 		if len(B.service.spec.template.spec.containers) > 10 {containers: error("the service has \(len(B.service.spec.template.spec.containers)) containers, over Cloud Run's 10 a revision: run some of GCP.sidecars apart (apart: {})")}
 		if B._millicpu > 8000 {cpu: error("the service's containers ask for \(B._millicpu) millicpu, over Cloud Run's 8000: lower GCP.sidecars' cpu")}
+		for n, c in R._apart if c.env.PORT != _|_ if c.env.PORT != "\(c.port)" {"port-\(n)": error("\(n) apart listens on its PORT, which Cloud Run sets to its port (\(c.port)), not \(c.env.PORT)")}
 		if len(R._overMemory) > 0 {memory: error("\(strings.Join(R._overMemory, ", ")) apart ask more memory than Cloud Run gives their CPU: at most 512Mi below 500 millicpu, 1Gi below 1000")}
 		scrapeConfig: [if len(R._scraped) > 0 {B.scrapeConfig}, ""][0]
 	}

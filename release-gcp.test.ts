@@ -501,6 +501,11 @@ Deno.test("a sidecar apart runs as its own service, dialed by the door at its ad
   const [c] = own.spec.template.spec.containers;
   assertStringIncludes(c.image, `battlechess-perf-collector@${digest("7")}`);
   assertEquals(c.ports, [{ name: "http1", containerPort: 8687 }]);
+  // Cloud Run sets its PORT from that port, and refuses a revision that names PORT itself.
+  const withPort = (await built(withApart(`{port: 8687, apart: {}, env: {PORT: "8687", MODE: "x"}}`), "sidecarServices")).value["perf-collector"];
+  const env = withPort.spec.template.spec.containers[0].env.map((e: { name: string }) => e.name);
+  assert(env.includes("MODE") && !env.includes("PORT"), env.join(","));
+  assertEquals((await built(withApart(`{port: 8687, apart: {}, env: {PORT: "9000"}}`), "plan")).success, false, "a PORT other than its port");
   assertEquals(own.spec.template.spec.serviceAccountName, "battlechess-run@brawl-chess.iam.gserviceaccount.com");
   // None at rest, as the cluster: it wakes on the door's requests.
   assertEquals(own.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"], "0");
