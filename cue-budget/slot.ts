@@ -128,6 +128,18 @@
 //                                            app's own literals, and two slots' identity brokers
 //                                            would share one port
 //
+// A launch is a stack kept up for someone to use, and forgotten: three of them held slots for 16 h
+// after their sessions were gone. So it ends after an hour (STACK_LAUNCH_TTL seconds, 3600; 0 =
+// none): at the deadline it stops its stack as a signal does, frees the slot, and logs what it
+// stopped (what, slot, pid, started, owner dir) to stderr and to the slot's owner file. The
+// deadline is <pool>/slot-<n>/deadline (ms since the epoch), shown on the "stack coming up" line
+// and by `status`; `renew [<slot n>|<pid>]` pushes it to now + the TTL (no argument: every live
+// launch). Only a launch has one: a gate, a rehearsal, integrate@local, a ci job, a --weight job
+// and a --mem cue claim take as long as they take (aprende's generate runs ~55 min).
+//
+//   deno run -A tests/slot.ts status         the slots held: holder, what, since when, deadline
+//   deno run -A tests/slot.ts renew [n|pid]  a launch's deadline to now + STACK_LAUNCH_TTL
+//
 // Run inside the app's toolchain (mise exec), which has process-compose, as the verbs are.
 
 const app = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -210,6 +222,18 @@ export const weightOf = (text: string, pid: number) => {
     ? { weight: Number(w), release: rest.includes("release"), mem: field("mem"), rss: field("rss") }
     : { weight: weights.stack, release: false, mem: 0, rss: 0 };
 };
+// A launch's TTL in seconds (STACK_LAUNCH_TTL, else an hour; 0 or less = none), and the deadline it
+// gives a claim made or renewed at `now` (ms since the epoch; 0 = none). Only a launch has one.
+export const launchTtl = (env: string | undefined = Deno.env.get("STACK_LAUNCH_TTL")) => {
+  const t = env === undefined || env.trim() === "" ? 3600 : Number(env);
+  return Number.isFinite(t) && t > 0 ? t : 0;
+};
+export const deadlineOf = (kind: "launch" | "gate" | "job" | "cue", now: number, ttl: number) => kind === "launch" && ttl > 0 ? now + ttl * 1000 : 0;
+// A claim is expired when it is a launch with a deadline and the deadline has come.
+export const expired = (claim: { kind: "launch" | "gate" | "job" | "cue"; deadline: number }, now: number) =>
+  claim.kind === "launch" && claim.deadline > 0 && now >= claim.deadline;
+// BRT, as the user reads times.
+const brt = (ms: number) => new Date(ms - 3 * 3600_000).toISOString().replace("T", " ").slice(0, 19) + " BRT";
 const weighs = async (name: string, pid: number) => weightOf(await Deno.readTextFile(`${pool}/${name}/weight`).catch(() => ""), pid);
 // The memory rule: a claim of `mem` GB fits when the memory the holders claimed (`held`, each its
 // claim and what it holds now), the memory reserved by the tickets ahead (`ahead`) and its own stay
@@ -727,7 +751,28 @@ if (import.meta.main && ["--weight", "--what", "--mem", "--mem-learn", "--cores-
 }
 
 if (import.meta.main) {
-  if (!Deno.args.length) { console.error("usage: deno run -A tests/slot.ts launch [--watch] | <command...> | --weight <n> --what <label> -- <command...>"); Deno.exit(2); }
+  if (!Deno.args.length) { console.error("usage: deno run -A tests/slot.ts launch [--watch] | <command...> | status | renew [n|pid] | --weight <n> --what <label> -- <command...>"); Deno.exit(2); }
+  if (Deno.args[0] === "status" || Deno.args[0] === "renew") {
+    const asked = Deno.args[1] === undefined ? 0 : Number(Deno.args[1]);
+    let found = 0;
+    const names: string[] = [];
+    try { for (const e of Deno.readDirSync(pool)) if (/^(slot|job)-[0-9]+$/.test(e.name)) names.push(e.name); } catch { /* no pool */ }
+    for (const name of names.sort((a, b) => Number(a.split("-")[1]) - Number(b.split("-")[1]))) {
+      const pid = await holder(name);
+      if (!await alive(pid)) continue;
+      const owner = (await Deno.readTextFile(`${pool}/${name}/owner`).catch(() => "")).trim();
+      const deadline = Number(await Deno.readTextFile(`${pool}/${name}/deadline`).catch(() => "0"));
+      if (Deno.args[0] === "status") { console.log(`${name} pid ${pid} ${owner}${deadline ? ` deadline ${brt(deadline)}` : ""}`); continue; }
+      if (!deadline || (asked && asked !== pid && `slot-${asked}` !== name)) continue;
+      const next = deadlineOf("launch", Date.now(), launchTtl());
+      if (!next) { say(`${name}: STACK_LAUNCH_TTL is 0, no deadline to push`); continue; }
+      await Deno.writeTextFile(`${pool}/${name}/deadline`, String(next));
+      say(`${name} (pid ${pid}) renewed to ${brt(next)}`);
+      found++;
+    }
+    if (Deno.args[0] === "renew" && !found) { console.error("no live launch with a deadline" + (asked ? ` for ${asked}` : "")); Deno.exit(1); }
+    Deno.exit(0);
+  }
   const args = /(^|\/)saytw$/.test(Deno.args[0]) && Deno.args[1] === "launch@local" ? ["launch", ...Deno.args.slice(2)] : Deno.args;
   if (args !== Deno.args) {
     for (const verb of ["generate", "build"]) {
@@ -738,8 +783,10 @@ if (import.meta.main) {
   }
   const slot = await claim(Deno.pid, args.join(" "), Number(Deno.env.get("STACK_WEIGHT") ?? (args[0] === "launch" ? weights.launch : weights.stack)));
   let stopping: (() => Promise<void>) | undefined;
+  // Where the command was run from: the owner dir an expiry names (the cwd, not the slot's copy).
+  const checkout = Deno.cwd();
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    Deno.addSignalListener(signal, async () => { await stopping?.(); slot.release(); Deno.exit(130); });
+    Deno.addSignalListener(signal, async () => { await stopping?.(); slot.release(); await Deno.remove(`${slot.dir.replace(/\/app$/, "")}/deadline`).catch(() => {}); Deno.exit(130); });
   }
   let code: number;
   if (args[0] === "launch") {
@@ -747,7 +794,27 @@ if (import.meta.main) {
     const s = stack(slot, tmp);
     const unwatch = args.includes("--watch") ? watch(slot, s.pc, s.env) : undefined;
     stopping = async () => { say("the stack going down"); unwatch?.(); await s.down(); };
-    say(`the stack coming up at ${slot.env.APP_URL}, its log ${tmp}/process-compose.log; stop it with a signal to ${Deno.pid}`);
+    // The launch ends after its TTL unless renewed (`renew`): the deadline is a file beside the slot's pid.
+    const slotDir = slot.dir.replace(/\/app$/, ""), started = new Date().toISOString();
+    const deadlineFile = `${slotDir}/deadline`;
+    const first = deadlineOf("launch", Date.now(), launchTtl());
+    if (first) await Deno.writeTextFile(deadlineFile, String(first));
+    say(`the stack coming up at ${slot.env.APP_URL}, its log ${tmp}/process-compose.log; stop it with a signal to ${Deno.pid}${first ? `; it ends at ${brt(first)} unless renewed (deno run -A tests/slot.ts renew ${slot.n})` : ""}`);
+    if (first) {
+      const timer = setInterval(async () => {
+        const deadline = Number(await Deno.readTextFile(deadlineFile).catch(() => "0"));
+        if (!expired({ kind: "launch", deadline }, Date.now())) return;
+        clearInterval(timer);
+        const line = `the launch timed out and is stopped: ${args.join(" ")}, slot ${slot.n}, pid ${Deno.pid}, started ${started}, owner dir ${checkout}`;
+        say(line);
+        await Deno.writeTextFile(`${slotDir}/owner`, `${line}\n`, { append: true }).catch(() => {});
+        await stopping?.();
+        slot.release();
+        await Deno.remove(deadlineFile).catch(() => {});
+        Deno.exit(0);
+      }, Number(Deno.env.get("STACK_LAUNCH_POLL_MS") ?? 5000));
+      Deno.unrefTimer(timer);
+    }
     code = (await s.child.status).code;
     if (code === 0) await Deno.remove(tmp, { recursive: true }).catch(() => {});
     else console.error((await Deno.readTextFile(`${tmp}/process-compose.log`).catch(() => "")).split("\n").slice(-40).join("\n"));
@@ -763,5 +830,6 @@ if (import.meta.main) {
     code = (await child.status).code;
   }
   slot.release();
+  await Deno.remove(`${slot.dir.replace(/\/app$/, "")}/deadline`).catch(() => {});
   Deno.exit(code);
 }
