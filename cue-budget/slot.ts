@@ -795,7 +795,7 @@ if (import.meta.main) {
     const unwatch = args.includes("--watch") ? watch(slot, s.pc, s.env) : undefined;
     stopping = async () => { say("the stack going down"); unwatch?.(); await s.down(); };
     // The launch ends after its TTL unless renewed (`renew`): the deadline is a file beside the slot's pid.
-    const slotDir = slot.dir.replace(/\/app$/, ""), started = new Date().toISOString();
+    const slotDir = slot.dir.replace(/\/app$/, ""), started = brt(Date.now());
     const deadlineFile = `${slotDir}/deadline`;
     const first = deadlineOf("launch", Date.now(), launchTtl());
     if (first) await Deno.writeTextFile(deadlineFile, String(first));
