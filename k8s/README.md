@@ -147,6 +147,7 @@ Load is shed at the gateway, by Envoy's concurrency limits on caddy's pool: past
 - **Authoring**: Encrypted via [SOPS](https://github.com/getsops/sops) + Age in Git (`apps/<app>/secrets.enc.yaml`).
 - **Operator Bridge**: External Secrets Operator (ESO) bridges encrypted or external secrets into native Kubernetes `v1/Secret` objects. Without a `ClusterSecretStore`, ESO `Password` generators make each secret once in-cluster; no secret is a literal in a spec.
 - **Database roles**: CloudNativePG sets `postgres`'s, `electric`'s and `authenticator`'s passwords from basic-auth secrets (`<app>-db-postgres`, `<app>-electric-db`, `<app>-authenticator-db`); the schema never sets a password. Compose sets both from `ELECTRIC_PASSWORD` and `AUTHENTICATOR_PASSWORD`, through mecha's initdb step.
+- **A service's database login**: `database.logins` names LOGIN roles of the app's own (each a member of the `inRoles` its migrations made), and a service's `database: {login, env}` connects as one, its URL in `env` (`DATABASE_URL` by default). CloudNativePG gets the role as a managed role; its password is generated in the cluster into `<app>-<login>-db` (dashes for underscores), with a `url` key, and never written anywhere. The service gets egress to the database on 5432 from a policy of its own.
 - **Runtime Access**: Workloads and Dapr sidecars consume native Kubernetes secrets (`type: secretstores.kubernetes`).
 
 ---
