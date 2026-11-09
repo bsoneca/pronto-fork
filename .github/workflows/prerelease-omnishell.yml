@@ -85,6 +85,25 @@ jobs:
           PY
           grep -n '"github:bonisoft3/omnishell"' toolchain/tools.cue
           grep -n 'module:' cue.mod/module.cue
+      # interpreter/vendor/mecha-client.js is not in omnishell's tree from 0.23
+      # (upstream's cd bundles it from mecha's client at release): bundled here
+      # from the fork's mecha release, .github/prerelease-omnishell.env's MECHA_V,
+      # before the module, the tarballs and the runtime image take the tree.
+      # Without it every shell page 404s on its modulepreload.
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.7
+      - name: mecha client
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mecha_v=$(sed -n 's/^MECHA_V=\([0-9A-Za-z.-]*\)$/\1/p' .github/prerelease-omnishell.env)
+          [ -n "$mecha_v" ] || { echo ".github/prerelease-omnishell.env names no MECHA_V" >&2; exit 1; }
+          mkdir "$RUNNER_TEMP/mecha"
+          gh release download "mecha-v$mecha_v" -R "$GITHUB_REPOSITORY" -p mecha-linux-x64.tar.gz -O - | tar xz -C "$RUNNER_TEMP/mecha"
+          cd "$RUNNER_TEMP/omnishell"
+          deno bundle --node-modules-dir=none --no-lock --config "$RUNNER_TEMP/mecha/packages/client/deno.json" --platform browser --format esm --minify "$RUNNER_TEMP/mecha/packages/client/omnishell-entry.ts" -o interpreter/vendor/mecha-client.js
+          ls -l interpreter/vendor/mecha-client.js
       # ghcr takes no single upload over 4MiB and `cue mod publish` sends a
       # module in one: publish to a local registry and let crane copy it up.
       - name: module
