@@ -105,6 +105,25 @@ jobs:
               -t "$AUTH:$MECHA_V" --push "$RUNNER_TEMP/auth"
           fi
           echo "auth: $AUTH:$MECHA_V@$(crane digest "$AUTH:$MECHA_V")" | tee -a "$GITHUB_STEP_SUMMARY"
+      # The airlock image: upstream's airlock at the release mecha-fork's line
+      # syncs onto (0.22.0), with the fork's airlock sources over it, so a door
+      # (mecha-fork#26) runs where a pronto prerelease or an operator pins it.
+      - name: airlock image
+        env:
+          AIRLOCK_BASE: bonitao/mecha-airlock:0.22.0@sha256:8b711e8ac228f49e6f0e8871cc45b7e8bd3cacbf99ab30ca224a3fa4416e3ecf
+          AIRLOCK: ghcr.io/bsoneca/mecha-airlock
+        run: |
+          if ! crane digest "$AIRLOCK:$MECHA_V" >/dev/null 2>&1; then
+            mkdir "$RUNNER_TEMP/airlock"
+            cp mecha/services/airlock/deno.json mecha/services/airlock/deno.lock mecha/services/airlock/*.ts "$RUNNER_TEMP/airlock/"
+            rm -f "$RUNNER_TEMP"/airlock/*_test.ts
+            printf 'FROM %s\nWORKDIR /app/airlock\nCOPY . /app/airlock/\nRUN deno cache main.ts\n' "$AIRLOCK_BASE" > "$RUNNER_TEMP/airlock/Dockerfile"
+            docker buildx build --platform linux/amd64,linux/arm64 \
+              --label org.opencontainers.image.source=https://github.com/bsoneca/mecha-fork \
+              --annotation index:org.opencontainers.image.source=https://github.com/bsoneca/mecha-fork \
+              -t "$AIRLOCK:$MECHA_V" --push "$RUNNER_TEMP/airlock"
+          fi
+          echo "airlock: $AIRLOCK:$MECHA_V@$(crane digest "$AIRLOCK:$MECHA_V")" | tee -a "$GITHUB_STEP_SUMMARY"
       # ghcr takes no single upload over 4MiB and `cue mod publish` sends a
       # module in one: publish to a local registry and let crane copy it up.
       - name: module
