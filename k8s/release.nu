@@ -98,10 +98,13 @@ export def operators-for [environment: record, --ha-now]: nothing -> list {
 # The replicas each controller of an operator runs, set after its manifests are applied (a static
 # manifest's own count would win again at the next apply otherwise): `controllers`, the
 # environment's #Environment.controllers (2 on metal, leader-elected, so n+1; 1 elsewhere, as the
-# manifests have them). Dapr's control plane counts by its own HA (operators-for).
+# manifests have them). Dapr's control plane counts by its own HA (operators-for). barman-cloud
+# stays at one, set back to it where an earlier release scaled it: its standby listens on its
+# readiness port only once it holds the leader lease, so a second replica is never Ready and the
+# rollout wait never ends (PRONTO-391); the database runs on while the plugin restarts.
 export def controller-replicas [operators: list, controllers: int]: nothing -> list {
 	$operators | each {|e|
-		if $e.name == "dapr" or ($e.check_deployments? | default [] | is-empty) or $controllers <= 1 { $e } else { $e | insert replicas $controllers }
+		if $e.name == "dapr" or ($e.check_deployments? | default [] | is-empty) or $controllers <= 1 { $e } else if $e.name == "barman-cloud" { $e | insert replicas 1 } else { $e | insert replicas $controllers }
 	}
 }
 
