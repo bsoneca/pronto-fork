@@ -627,7 +627,9 @@ def test_alerting [] {
 	$"#!/bin/sh\necho \"$@\" >> ($log)\n" | save $"($dir)/bin/kubectl"
 	^chmod +x $"($dir)/bin/kubectl"
 	with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} { apply-alert-rules "sample" ["observability/journeys.rules.yaml"] $"($dir)/app" "sample" }
-	let call = (open $log | lines | where {|l| $l starts-with "create" } | first)
+	let calls = (if ($log | path exists) { open --raw $log | lines } else { [] })
+	let call = ($calls | where {|l| $l starts-with "create" } | get -o 0 | default "")
+	assert ($call != "") $"kubectl was asked to create the rules' ConfigMap: it was called ($calls | to nuon), PATH ($env.PATH | to nuon)"
 	assert (($call | str starts-with "create configmap sample-alert-rules -n sample --from-file=journeys.rules.yaml=") and ($call | str ends-with "/app/observability/journeys.rules.yaml --dry-run=client -o yaml")) $"the rules are written under their names: ($call)"
 	let twice = (try { with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} { apply-alert-rules "sample" ["a/x.yaml" "b/x.yaml"] $"($dir)/app" "sample" }; false } catch { true })
 	assert $twice "two files of one name are refused"
