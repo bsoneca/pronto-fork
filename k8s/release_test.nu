@@ -1182,6 +1182,12 @@ def test_observability_manifests [] {
 	assert equal ($vm | where kind == PersistentVolumeClaim | get metadata.name) [vmsingle-data]
 	let vmd = ($vm | where kind == Deployment and metadata.name == vmsingle | first).spec
 	assert equal $vmd.strategy.type Recreate
+	# An app's pods are read one by one, each series naming its pod (PRONTO-370), and a changed
+	# scrape config is picked up without a restart.
+	let scrape = ($vm | where kind == ConfigMap and metadata.name == vmsingle-config | first | get data."promscrape.yaml" | from yaml)
+	let pods = ($scrape.scrape_configs | where job_name == kubernetes-pods | first)
+	assert ($pods.relabel_configs | any {|r| $r.source_labels? == ["__meta_kubernetes_pod_name"] and $r.target_label? == "pod" }) "every app series names its pod"
+	assert ("-promscrape.configCheckInterval=1m" in $vmd.template.spec.containers.0.args)
 	assert ($vmd.template.spec.containers.0.volumeMounts | any {|m| $m.name == "data" and $m.mountPath == "/vmsingle-data" })
 	assert equal ($vmd.template.spec.volumes | where name == data | first).persistentVolumeClaim.claimName vmsingle-data
 	assert ($yaml | str contains "image: docker.io/victoriametrics/victoria-metrics:v1.106.1@sha256:54b283129634239db62798fd8d92e8d8d4372a0b114e72967eb233dbb264ff53")
