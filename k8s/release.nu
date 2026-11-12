@@ -59,6 +59,11 @@ export const OPERATORS = [
 		checksum: "sha256:8f377ff4a7d0d3f74fc64b0f7ac4f449fc38ca9e83a40107cca2f9315a9bd920"
 		namespace: "cnpg-system"
 		check_deployments: ["barman-cloud"]
+		# Every replica hot, serving the operator's gRPC (the owner, 2026-11-12: "I don't want
+		# replicas idle. I want the hot with traffic"): with leader election a standby opens no
+		# port 9090, so it took no traffic and was never Ready (PRONTO-391). Its reconcilers write
+		# a cluster's Role and RoleBinding by server-side apply, the same from either replica.
+		drop_args: ["--leader-elect"]
 	},
 	{
 		name: "external-secrets"
@@ -98,13 +103,10 @@ export def operators-for [environment: record, --ha-now]: nothing -> list {
 # The replicas each controller of an operator runs, set after its manifests are applied (a static
 # manifest's own count would win again at the next apply otherwise): `controllers`, the
 # environment's #Environment.controllers (2 on metal, leader-elected, so n+1; 1 elsewhere, as the
-# manifests have them). Dapr's control plane counts by its own HA (operators-for). barman-cloud
-# stays at one, set back to it where an earlier release scaled it: its standby listens on its
-# readiness port only once it holds the leader lease, so a second replica is never Ready and the
-# rollout wait never ends (PRONTO-391); the database runs on while the plugin restarts.
+# manifests have them). Dapr's control plane counts by its own HA (operators-for).
 export def controller-replicas [operators: list, controllers: int]: nothing -> list {
 	$operators | each {|e|
-		if $e.name == "dapr" or ($e.check_deployments? | default [] | is-empty) or $controllers <= 1 { $e } else if $e.name == "barman-cloud" { $e | insert replicas 1 } else { $e | insert replicas $controllers }
+		if $e.name == "dapr" or ($e.check_deployments? | default [] | is-empty) or $controllers <= 1 { $e } else { $e | insert replicas $controllers }
 	}
 }
 
@@ -188,13 +190,25 @@ export def ensure-operators [
 	ensure-envoy-gateway-class $ingress
 }
 
+# A manifest without the container arguments named, each a list item of its own (`- --flag`),
+# as text so the rest of the manifest is applied byte for byte.
+export def drop-args [args: list]: string -> string {
+	let text = $in
+	$args | reduce -f $text {|a, t| $t | str replace --all --regex $"\(?m\)^[ \t]*- ['\"]?($a)['\"]?[ \t]*\r?\n" "" }
+}
+
 # One operator: its manifests applied, its deployments waited for.
 def install-operator [entry: record, timeout: string] {
 	if ($entry.namespace? | is-not-empty) {
 		kubectl create namespace $entry.namespace --dry-run=client -o yaml | kubectl apply -f -
 	}
 
-	let file = (fetch-verified $entry)
+	let fetched = (fetch-verified $entry)
+	let file = if ($entry.drop_args? | default [] | is-empty) { $fetched } else {
+		let out = $"($fetched).hot.yaml"
+		open --raw $fetched | drop-args ($entry.drop_args) | save --force --raw $out
+		$out
+	}
 	if ($entry.kind? | default "") == "helm" {
 		# Split as text: a YAML round trip through nu rewrites values kubectl then rejects.
 		let docs = (helm template $entry.name $file --include-crds --namespace $entry.namespace ...($entry.set? | default [] | each { [--set $in] } | flatten) | split row --regex '(?m)^---\s*$' | where ($it | str trim | is-not-empty))
