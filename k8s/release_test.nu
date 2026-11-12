@@ -8,6 +8,7 @@ const fixtures_dir = path self testdata
 use std/assert
 
 use release.nu [
+	drop-retired-electric-slot
 	tenant-manifests
 	tenant-refusals
 	tenant-repo
@@ -17,6 +18,9 @@ use release.nu [
 	node-buildkit-manifests
 	OPERATORS
 	operators-for
+	rollout-sample
+	rollout-floors
+	rollout-verdict
 	controller-replicas
 	tunnel-proxy-kubernetes
 	get-operator-cache-dir
@@ -56,6 +60,7 @@ def run-tests [] {
 	test_operators_metadata
 	test_dapr_ha
 	test_electric_sticky
+	test_electric_slots
 	test_native_runtime
 	test_resolve_app_by_path
 	test_resolve_app_nonexistent_fails
@@ -70,6 +75,8 @@ def run-tests [] {
 	test_render_manifests_metal
 	test_render_ready_through_the_door
 	test_app_services
+	test_app_service_readiness
+	test_rollout_guard
 	test_app_service_jail
 	test_container_resources_and_files
 	test_service_host
@@ -957,6 +964,55 @@ def test_app_services [] {
 	assert ($pol.spec.egress | any {|e| ($e.ports? | default [] | any {|p| $p.port == 443 }) }) "it reaches a broker on 443"
 }
 
+def test_app_service_readiness [] {
+	print "test an app service is ready once it serves: its health route, else its port..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let data = (mktemp -t ready.XXXXXX.json | str trim)
+	{App: {services: {billing: {port: 8688, env: {}, health: "/healthz"}, exporter: {port: 9399, env: {}}}}} | to json | save -f $data
+	let objs = (render-manifests $app.cue_path "metal" --data $data | from yaml)
+	rm $data
+	let probe = {|n| $objs | where kind == "Deployment" and metadata.name == $"sample-($n)" | first | get spec.template.spec.containers.0.readinessProbe }
+	assert equal (do $probe billing) {httpGet: {path: "/healthz", port: 8688}, periodSeconds: 5, failureThreshold: 3}
+	assert equal (do $probe exporter) {tcpSocket: {port: 9399}, periodSeconds: 5, failureThreshold: 3}
+}
+
+def test_rollout_guard [] {
+	print "test the rollout guard: n-1 held passes, a dip fails naming it, new pods never ready fail while the old serve..."
+	let dep = {|name, want, ready, updated, total, gen|
+		{metadata: {name: $name, generation: 2}, spec: {replicas: $want}, status: {observedGeneration: $gen, readyReplicas: $ready, updatedReplicas: $updated, replicas: $total}}
+	}
+	let before = (rollout-sample [(do $dep "app-crud" 3 3 3 3 1) (do $dep "app-auth" 1 1 1 1 1)])
+	let floors = (rollout-floors $before)
+	assert equal $floors {app-crud: 2, app-auth: 0}
+	# A surge rollout: 4 pods for a moment, never fewer than two ready, then done.
+	let held = [
+		[(do $dep "app-crud" 3 3 1 4 2) (do $dep "app-auth" 1 0 1 1 2)]
+		[(do $dep "app-crud" 3 2 2 4 2) (do $dep "app-auth" 1 1 1 1 2)]
+		[(do $dep "app-crud" 3 3 3 3 2) (do $dep "app-auth" 1 1 1 1 2)]
+	] | each {|s| rollout-sample $s }
+	assert equal (rollout-verdict $floors $held) {held: true, why: ""}
+	# One sample with a single crud pod ready: the release fails, naming crud.
+	let dipped = [
+		[(do $dep "app-crud" 3 3 1 4 2) (do $dep "app-auth" 1 1 1 1 2)]
+		[(do $dep "app-crud" 3 1 2 3 2) (do $dep "app-auth" 1 1 1 1 2)]
+		[(do $dep "app-crud" 3 3 3 3 2) (do $dep "app-auth" 1 1 1 1 2)]
+	] | each {|s| rollout-sample $s }
+	let d = (rollout-verdict $floors $dipped)
+	assert (not $d.held)
+	assert ($d.why | str contains "app-crud: 1 of 3 ready") $d.why
+	assert not ($d.why | str contains "app-auth")
+	# New pods that never get ready: the old three keep serving, and the release fails at its wait.
+	let stuck = [
+		[(do $dep "app-crud" 3 3 1 4 2)]
+		[(do $dep "app-crud" 3 3 1 4 2)]
+	] | each {|s| rollout-sample $s }
+	let st = (rollout-verdict $floors $stuck)
+	assert (not $st.held)
+	assert ($st.why | str contains "not rolled out in time, the old pods still serving: app-crud") $st.why
+	# A new Deployment, or one growing from one to three, is held to what it had before.
+	assert equal (rollout-floors (rollout-sample [(do $dep "app-new" 3 0 0 0 1) (do $dep "app-grow" 3 1 1 1 1)])) {app-new: 0, app-grow: 1}
+}
+
 def test_app_service_jail [] {
 	print "test a service may run a jail, act as a Google account, reach past the services' policy and keep scratch folders..."
 	let app = (resolve-app ($fixtures_dir | path join "sample"))
@@ -1428,13 +1484,13 @@ def test_database_ha [] {
 	let one = (do $cluster {})
 	assert equal $one.instances 1
 	for f in [enablePDB replicationSlots] { assert ($f not-in ($one | columns)) $"one instance renders no ($f), as before" }
-	assert ($one.postgresql? == null) "nor a postgresql block"
+	assert ("synchronous" not-in ($one.postgresql | columns)) "nor synchronous replication"
 	let three = (do $cluster {database: {instances: 3, parameters: {max_slot_wal_keep_size: "2GB"}}})
 	assert equal $three.instances 3
 	assert equal $three.postgresql.synchronous {method: "any", number: 1, dataDurability: "preferred"}
 	assert equal $three.replicationSlots {highAvailability: {enabled: true}}
 	assert equal $three.enablePDB true
-	assert equal $three.postgresql.parameters {max_slot_wal_keep_size: "2GB"}
+	assert equal $three.postgresql.parameters {max_replication_slots: "32", max_wal_senders: "10", max_slot_wal_keep_size: "2GB"} "the app's own parameter wins"
 	let strict = (do $cluster {database: {instances: 3, synchronous: {dataDurability: "required"}, haSlots: false, enablePDB: false}})
 	assert equal $strict.postgresql.synchronous.dataDurability "required"
 	assert ("replicationSlots" not-in ($strict | columns))
@@ -1462,6 +1518,53 @@ def test_electric_sticky [] {
 	assert ($door | str contains "import electric-upstream-{$PRONTO_ELECTRIC_UPSTREAM:one}")
 	assert ($door | str contains "(electric-upstream-pods) {\n  dynamic a {$PRONTO_ELECTRIC_PODS:electric} 3000 {")
 	assert ($door | str contains "lb_policy cookie pronto_electric {$ELECTRIC_SECRET}")
+}
+
+def test_electric_slots [] {
+	print "test every Electric takes a temporary slot of its own, the database has room for them, and the old slot goes once..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let render = {|app_data|
+		let data = (mktemp -t slots.XXXXXX.json | str trim)
+		{App: $app_data} | to json | save -f $data
+		let objs = (render-manifests $app.cue_path metal --data $data | from yaml)
+		rm $data
+		$objs
+	}
+	let one = (do $render {})
+	let electric = ($one | where kind == Deployment and metadata.name == sample-electric | first | get spec.template.spec.containers.0.env)
+	for v in [CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME] {
+		assert equal ($electric | where name == $v | first | get value) "true" $"($v): a slot of its own, gone with its connection"
+	}
+	# Room: one slot and sender an Electric, twice over through a rollout, each standby's and two to
+	# spare, never under CloudNativePG's defaults; a slot's WAL capped at a quarter of the volume.
+	let params = {|objs| $objs | where kind == Cluster | first | get spec.postgresql.parameters }
+	assert equal (do $params $one) {max_replication_slots: "32", max_wal_senders: "10", max_slot_wal_keep_size: "256MB"}
+	let big = (do $params (do $render {replicas: 3, scale: {electric: {replicas: 6}}, database: {instances: 3, storage: "20Gi"}}))
+	assert equal $big {max_replication_slots: "32", max_wal_senders: "16", max_slot_wal_keep_size: "5120MB"} "6 Electrics twice over, 2 standbys and 2 to spare"
+	let preview = (do $params (do $render {preview: pr1, scale: {electric: {replicas: 6, preview: 2}}}))
+	assert equal $preview.max_wal_senders "10" "a preview's Electrics are its own count"
+	assert equal (do $params (do $render {database: {storage: "512Mi", slotWalKeepMB: 100}}) | get max_slot_wal_keep_size) "100MB"
+	assert ((try { do $render {database: {storage: "1G"}}; false } catch { true })) "a volume is stated in Mi, Gi or Ti"
+
+	# The old slot: dropped once nothing holds it, waited for while something does, and a rerun finds none.
+	let dir = (mktemp -d -t slots.XXXXXX | str trim)
+	mkdir $"($dir)/bin"
+	$"#!/bin/sh\necho \"$*\" >> ($dir)/log\ncase \"$*\" in\n  *pg_drop_replication_slot*\) echo 1 ;;\n  *\) cat ($dir)/state ;;\nesac\n" | save $"($dir)/bin/kubectl"
+	chmod +x $"($dir)/bin/kubectl"
+	let db = {namespace: sample, pod: sample-db-1, database: sample}
+	with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} {
+		"" | save -f $"($dir)/state"
+		assert equal (drop-retired-electric-slot $db) "none" "a database without the slot is left as it is"
+		assert (open $"($dir)/log" | lines | all {|l| not ($l | str contains pg_drop_replication_slot) }) "and nothing is dropped"
+		"f\n" | save -f $"($dir)/state"
+		assert equal (drop-retired-electric-slot $db) "dropped"
+		let drop = (open $"($dir)/log" | lines | where {|l| $l | str contains pg_drop_replication_slot } | first)
+		assert ($drop | str contains "exec -n sample sample-db-1 -c postgres -- psql -U postgres -d sample") $"on the primary: ($drop)"
+		assert ($drop | str contains "WHERE slot_name = 'electric_slot_default' AND NOT active") $"only a slot nobody holds: ($drop)"
+		"t\n" | save -f $"($dir)/state"
+		assert ((try { drop-retired-electric-slot $db --wait 1sec; false } catch {|e| $e.msg | str contains "still held" })) "a slot still held fails the release once its wait is out"
+	}
+	rm -r $dir
 }
 
 def test_preview_renders_apart [] {
