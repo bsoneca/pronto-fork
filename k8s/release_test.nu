@@ -8,6 +8,7 @@ const fixtures_dir = path self testdata
 use std/assert
 
 use release.nu [
+	drop-retired-electric-slot
 	tenant-manifests
 	tenant-refusals
 	tenant-repo
@@ -20,6 +21,8 @@ use release.nu [
 	rollout-sample
 	rollout-floors
 	rollout-verdict
+	controller-replicas
+	tunnel-proxy-kubernetes
 	get-operator-cache-dir
 	fetch-verified
 	resolve-app
@@ -56,6 +59,7 @@ def run-tests [] {
 
 	test_operators_metadata
 	test_dapr_ha
+	test_electric_slots
 	test_native_runtime
 	test_resolve_app_by_path
 	test_resolve_app_nonexistent_fails
@@ -99,6 +103,7 @@ def run-tests [] {
 	test_environment_build_buildkit
 	test_environment_secrets
 	test_envoy_proxy
+	test_controller_replicas
 	test_render_manifests_aks
 	test_dapr_annotations
 	test_timeout_budget_nests
@@ -111,6 +116,7 @@ def run-tests [] {
 	test_cloud_release_refused
 	test_preview_renders_apart
 	test_replicas_budget_spread
+	test_database_ha
 	test_preview_origin_https
 	test_preview_delete_needs_a_preview
 	test_preview_schema_from
@@ -258,6 +264,15 @@ def test_auth_provider_secrets [] {
 	{App: {auth: ($android | reject secretValues)}} | to json | save -f $data
 	let with_android = (render-manifests $app.cue_path "kind" --data $data | from yaml | where kind == "Deployment" and metadata.name == "sample-auth" | first)
 	assert equal ($with_android.spec.template.spec.containers.0.env | where name == "WEBAUTHN_ANDROID_ORIGINS" | first | get value) $fp
+	assert equal $split.apiKeysGate ""
+	assert (($pod.spec.containers.0.env | where name =~ "^AUTH_API_KEYS") | is-empty)
+	# An app's gate over its API keys (PRONTO-323), as compose gives auth it, turns keys on in its pod.
+	let gated = (auth-provider-environment ($environment | insert AUTH_API_KEYS_GATE "public.api_keys_on"))
+	{App: {auth: ($gated | reject secretValues)}} | to json | save -f $data
+	let with_gate = (render-manifests $app.cue_path "kind" --data $data | from yaml | where kind == "Deployment" and metadata.name == "sample-auth" | first)
+	let gate_env = $with_gate.spec.template.spec.containers.0.env
+	assert equal ($gate_env | where name == "AUTH_API_KEYS" | first | get value) "true"
+	assert equal ($gate_env | where name == "AUTH_API_KEYS_GATE" | first | get value) "public.api_keys_on"
 	let rotated = (auth-provider-environment ($environment | update OIDC_GOOGLE_CLIENT_SECRET "rotated-credential"))
 	assert ($rotated.oidcSecretDigest != $split.oidcSecretDigest)
 	let public_client = (auth-provider-environment ($environment | update OIDC_GOOGLE_CLIENT_SECRET ""))
@@ -629,12 +644,14 @@ def test_alerting [] {
 	mkdir $"($dir)/bin" $"($dir)/app/observability"
 	"groups: []\n" | save $"($dir)/app/observability/journeys.rules.yaml"
 	let log = $"($dir)/kubectl.log"
-	$"#!/bin/sh\necho \"$@\" >> ($log)\n" | save $"($dir)/bin/kubectl"
+	# Like kubectl, `apply -f -` reads its input to the end: nu waits only for a pipeline's last
+	# command, so a fake apply that read nothing could return before create had written its line.
+	$"#!/bin/sh\necho \"$@\" >> ($log)\n[ \"$1\" = apply ] && cat > /dev/null\nexit 0\n" | save $"($dir)/bin/kubectl"
 	^chmod +x $"($dir)/bin/kubectl"
 	with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} { apply-alert-rules "sample" ["observability/journeys.rules.yaml"] $"($dir)/app" "sample" }
 	let calls = (if ($log | path exists) { open --raw $log | lines } else { [] })
 	let call = ($calls | where {|l| $l starts-with "create" } | get -o 0 | default "")
-	assert ($call != "") $"kubectl was asked to create the rules' ConfigMap: it was called ($calls | to nuon), PATH ($env.PATH | to nuon)"
+	assert ($call != "") $"kubectl was asked to create the rules' ConfigMap: it was called ($calls | to nuon)"
 	assert (($call | str starts-with "create configmap sample-alert-rules -n sample --from-file=journeys.rules.yaml=") and ($call | str ends-with "/app/observability/journeys.rules.yaml --dry-run=client -o yaml")) $"the rules are written under their names: ($call)"
 	let twice = (try { with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} { apply-alert-rules "sample" ["a/x.yaml" "b/x.yaml"] $"($dir)/app" "sample" }; false } catch { true })
 	assert $twice "two files of one name are refused"
@@ -763,7 +780,17 @@ def test_metrics_export [] {
 	rm $data
 	let cm = ($objs | where kind == "ConfigMap" and metadata.name == "sample-metrics-export" | first)
 	let config = ($cm.data."config.yaml" | from yaml)
-	assert equal ($config.receivers.prometheus.config.scrape_configs | first | get static_configs.0.targets) ["journeys-collector.sample.svc.cluster.local:9598"]
+	# Each pod, not the Service (PRONTO-370): its own address and its name on every series.
+	let scrape = ($config.receivers.prometheus.config.scrape_configs | first)
+	assert ("static_configs" not-in ($scrape | columns)) "no scrape of the Service, which answers from one pod at random"
+	assert equal $scrape.kubernetes_sd_configs [{role: "pod", namespaces: {names: [sample]}, selectors: [{role: "pod", label: "app.kubernetes.io/name=sample,app.kubernetes.io/component=journeys-collector"}]}]
+	assert equal ($scrape.relabel_configs | get target_label? | compact) ["__address__" "pod"]
+	assert equal ($scrape.relabel_configs | where target_label? == "__address__" | first | get replacement) "$${1}:9598" "the collector's own $ is escaped"
+	assert equal ($scrape.relabel_configs | first) {source_labels: ["__meta_kubernetes_pod_phase"], regex: "Running", action: "keep"}
+	let role = ($objs | where kind == "Role" and metadata.name == "sample-metrics-export" | first)
+	assert equal $role.rules [{apiGroups: [""], resources: ["pods"], verbs: ["get" "list" "watch"]}] "it lists pods, and reads nothing else"
+	let binding = ($objs | where kind == "RoleBinding" and metadata.name == "sample-metrics-export" | first)
+	assert equal $binding.subjects [{kind: "ServiceAccount", name: "sample-metrics-export", namespace: "sample"}]
 	assert equal $config.exporters.googlemanagedprometheus.project "brawl-chess"
 	let creds = ($cm.data."credentials.json" | from json)
 	assert equal $creds.audience "//iam.googleapis.com/projects/504479523278/locations/global/workloadIdentityPools/contabo/providers/k3s"
@@ -1066,6 +1093,11 @@ def test_tunnel_manifests [] {
 	let container = ($deployment.spec.template.spec.containers | first)
 	assert ($container.image =~ '^cloudflare/cloudflared:[0-9.]+@sha256:[0-9a-f]{64}$')
 	assert equal ($deployment.spec.template.spec.volumes | where name == "credentials" | first | get secret.secretName) "tunnel-credentials"
+	# n+1 (PRONTO-361): three connectors, a budget of two, spread over the nodes where it can.
+	assert equal $deployment.spec.replicas 3
+	assert equal $deployment.spec.template.spec.topologySpreadConstraints [{maxSkew: 1, topologyKey: "kubernetes.io/hostname", whenUnsatisfiable: "ScheduleAnyway", labelSelector: {matchLabels: {"app.kubernetes.io/name": "cloudflared"}}}]
+	let pdb = ($docs | where kind == "PodDisruptionBudget" | first)
+	assert equal [$pdb.metadata.namespace $pdb.spec.minAvailable $pdb.spec.selector.matchLabels] ["cloudflared" 2 $deployment.spec.selector.matchLabels]
 }
 
 def test_envoy_proxy [] {
@@ -1075,6 +1107,28 @@ def test_envoy_proxy [] {
 	assert equal ($docs.0.spec.provider.kubernetes.envoyService.name) "pronto-gateway"
 	assert equal ($docs.1.metadata.name) "eg"
 	assert equal ($docs.1.spec.parametersRef.name) "tunnel-proxy"
+	# The tunnel's own: three Envoy pods with a budget of two, spread over the nodes (PRONTO-361).
+	let k = (envoy-proxy "tunnel-proxy" (tunnel-proxy-kubernetes) | from yaml | get 0.spec.provider.kubernetes)
+	assert equal $k.envoyService {type: "ClusterIP", name: "pronto-gateway"}
+	assert equal $k.envoyDeployment.replicas 3
+	assert equal $k.envoyPDB {minAvailable: 2}
+	assert equal $k.envoyDeployment.pod.topologySpreadConstraints.0.labelSelector.matchLabels {"app.kubernetes.io/name": "envoy", "gateway.envoyproxy.io/owning-gatewayclass": "eg"}
+	assert equal $k.envoyDeployment.pod.topologySpreadConstraints.0.whenUnsatisfiable "ScheduleAnyway"
+}
+
+def test_controller_replicas [] {
+	print "test each operator's controllers run two on metal, set after the install, and as their manifests elsewhere..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let metal = (read-environment metal $app.cue_path)
+	assert equal $metal.controllers 2
+	assert equal (read-environment kind | get controllers) 1
+	let two = (controller-replicas $OPERATORS $metal.controllers)
+	for n in [envoy-gateway cnpg cert-manager barman-cloud external-secrets] {
+		assert equal ($two | where name == $n | first | get replicas) 2 $n
+	}
+	assert ("replicas" not-in ($two | where name == "gateway-api-crds" | first | columns)) "no controllers, no count"
+	assert ("replicas" not-in ($two | where name == "dapr" | first | columns)) "Dapr counts by its own HA"
+	assert equal (controller-replicas $OPERATORS 1) $OPERATORS "one is the manifests' own"
 }
 
 def test_schema_jobs_wait_for_database [] {
@@ -1226,6 +1280,12 @@ def test_observability_manifests [] {
 	assert equal ($vm | where kind == PersistentVolumeClaim | get metadata.name) [vmsingle-data]
 	let vmd = ($vm | where kind == Deployment and metadata.name == vmsingle | first).spec
 	assert equal $vmd.strategy.type Recreate
+	# An app's pods are read one by one, each series naming its pod (PRONTO-370), and a changed
+	# scrape config is picked up without a restart.
+	let scrape = ($vm | where kind == ConfigMap and metadata.name == vmsingle-config | first | get data."promscrape.yaml" | from yaml)
+	let pods = ($scrape.scrape_configs | where job_name == kubernetes-pods | first)
+	assert ($pods.relabel_configs | any {|r| $r.source_labels? == ["__meta_kubernetes_pod_name"] and $r.target_label? == "pod" }) "every app series names its pod"
+	assert ("-promscrape.configCheckInterval=1m" in $vmd.template.spec.containers.0.args)
 	assert ($vmd.template.spec.containers.0.volumeMounts | any {|m| $m.name == "data" and $m.mountPath == "/vmsingle-data" })
 	assert equal ($vmd.template.spec.volumes | where name == data | first).persistentVolumeClaim.claimName vmsingle-data
 	assert ($yaml | str contains "image: docker.io/victoriametrics/victoria-metrics:v1.106.1@sha256:54b283129634239db62798fd8d92e8d8d4372a0b114e72967eb233dbb264ff53")
@@ -1408,6 +1468,80 @@ def test_replicas_budget_spread [] {
 	assert equal ($brc | get sample-rc-caddy | get minAvailable) 2
 	assert ("sample-rc-render" not-in ($brc | columns))
 	assert equal ($rc | where kind == "PodDisruptionBudget" | get metadata.namespace | uniq) [sample-rc]
+}
+
+def test_database_ha [] {
+	print "test the database's HA settings: none at one instance, synchronous standbys, slots and a budget at three..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let cluster = {|app_data|
+		let data = (mktemp -t dbha.XXXXXX.json | str trim)
+		{App: $app_data} | to json | save -f $data
+		let c = (render-manifests $app.cue_path metal --data $data | from yaml | where kind == "Cluster" | first | get spec)
+		rm $data
+		$c
+	}
+	let one = (do $cluster {})
+	assert equal $one.instances 1
+	for f in [enablePDB replicationSlots] { assert ($f not-in ($one | columns)) $"one instance renders no ($f), as before" }
+	assert ("synchronous" not-in ($one.postgresql | columns)) "nor synchronous replication"
+	let three = (do $cluster {database: {instances: 3, parameters: {max_slot_wal_keep_size: "2GB"}}})
+	assert equal $three.instances 3
+	assert equal $three.postgresql.synchronous {method: "any", number: 1, dataDurability: "preferred"}
+	assert equal $three.replicationSlots {highAvailability: {enabled: true}}
+	assert equal $three.enablePDB true
+	assert equal $three.postgresql.parameters {max_replication_slots: "32", max_wal_senders: "10", max_slot_wal_keep_size: "2GB"} "the app's own parameter wins"
+	let strict = (do $cluster {database: {instances: 3, synchronous: {dataDurability: "required"}, haSlots: false, enablePDB: false}})
+	assert equal $strict.postgresql.synchronous.dataDurability "required"
+	assert ("replicationSlots" not-in ($strict | columns))
+	assert equal $strict.enablePDB false
+	assert equal (do $cluster {database: {enablePDB: false}} | get enablePDB) false "one instance may turn the budget off"
+}
+
+def test_electric_slots [] {
+	print "test every Electric takes a temporary slot of its own, the database has room for them, and the old slot goes once..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let render = {|app_data|
+		let data = (mktemp -t slots.XXXXXX.json | str trim)
+		{App: $app_data} | to json | save -f $data
+		let objs = (render-manifests $app.cue_path metal --data $data | from yaml)
+		rm $data
+		$objs
+	}
+	let one = (do $render {})
+	let electric = ($one | where kind == Deployment and metadata.name == sample-electric | first | get spec.template.spec.containers.0.env)
+	for v in [CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME] {
+		assert equal ($electric | where name == $v | first | get value) "true" $"($v): a slot of its own, gone with its connection"
+	}
+	# Room: one slot and sender an Electric, twice over through a rollout, each standby's and two to
+	# spare, never under CloudNativePG's defaults; a slot's WAL capped at a quarter of the volume.
+	let params = {|objs| $objs | where kind == Cluster | first | get spec.postgresql.parameters }
+	assert equal (do $params $one) {max_replication_slots: "32", max_wal_senders: "10", max_slot_wal_keep_size: "256MB"}
+	let big = (do $params (do $render {replicas: 3, scale: {electric: {replicas: 6}}, database: {instances: 3, storage: "20Gi"}}))
+	assert equal $big {max_replication_slots: "32", max_wal_senders: "16", max_slot_wal_keep_size: "5120MB"} "6 Electrics twice over, 2 standbys and 2 to spare"
+	let preview = (do $params (do $render {preview: pr1, scale: {electric: {replicas: 6, preview: 2}}}))
+	assert equal $preview.max_wal_senders "10" "a preview's Electrics are its own count"
+	assert equal (do $params (do $render {database: {storage: "512Mi", slotWalKeepMB: 100}}) | get max_slot_wal_keep_size) "100MB"
+	assert ((try { do $render {database: {storage: "1G"}}; false } catch { true })) "a volume is stated in Mi, Gi or Ti"
+
+	# The old slot: dropped once nothing holds it, waited for while something does, and a rerun finds none.
+	let dir = (mktemp -d -t slots.XXXXXX | str trim)
+	mkdir $"($dir)/bin"
+	$"#!/bin/sh\necho \"$*\" >> ($dir)/log\ncase \"$*\" in\n  *pg_drop_replication_slot*\) echo 1 ;;\n  *\) cat ($dir)/state ;;\nesac\n" | save $"($dir)/bin/kubectl"
+	chmod +x $"($dir)/bin/kubectl"
+	let db = {namespace: sample, pod: sample-db-1, database: sample}
+	with-env {PATH: ($env.PATH | prepend $"($dir)/bin")} {
+		"" | save -f $"($dir)/state"
+		assert equal (drop-retired-electric-slot $db) "none" "a database without the slot is left as it is"
+		assert (open $"($dir)/log" | lines | all {|l| not ($l | str contains pg_drop_replication_slot) }) "and nothing is dropped"
+		"f\n" | save -f $"($dir)/state"
+		assert equal (drop-retired-electric-slot $db) "dropped"
+		let drop = (open $"($dir)/log" | lines | where {|l| $l | str contains pg_drop_replication_slot } | first)
+		assert ($drop | str contains "exec -n sample sample-db-1 -c postgres -- psql -U postgres -d sample") $"on the primary: ($drop)"
+		assert ($drop | str contains "WHERE slot_name = 'electric_slot_default' AND NOT active") $"only a slot nobody holds: ($drop)"
+		"t\n" | save -f $"($dir)/state"
+		assert ((try { drop-retired-electric-slot $db --wait 1sec; false } catch {|e| $e.msg | str contains "still held" })) "a slot still held fails the release once its wait is out"
+	}
+	rm -r $dir
 }
 
 def test_preview_renders_apart [] {

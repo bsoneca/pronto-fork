@@ -188,11 +188,16 @@ import (
 			}
 			spec: {
 				instances: release.database.instances
-				// upstream's parameters for the services an app's compose runs beside the cluster
-				// (feldera, conduit: logical slots); an app without them keeps the parameters its
-				// live database runs with, as a change to them restarts it.
-				if len(release.runtime) > 0 {
-					postgresql: parameters: {
+				// Every database's replication room (PRONTO-363): a slot and a sender for each Electric
+				// (its own temporary slot, twice over while a rollout runs the old pods beside the new),
+				// each standby and two to spare, never under CloudNativePG's own defaults (32 slots, 10
+				// senders), so a database already running them is not restarted for them. 128 each
+				// with upstream's parameters for the services an app's compose runs beside the cluster
+				// (feldera, conduit: logical slots). Any slot holds at most slotWalKeepMB of WAL. The
+				// app's own parameters win.
+				let streams = 2*countOf["electric"] + release.database.instances - 1 + 2
+				let base = {
+					if len(release.runtime) > 0 {
 						wal_level:             "logical"
 						max_replication_slots: "128"
 						max_wal_senders:       "128"
@@ -201,6 +206,25 @@ import (
 						synchronous_commit:    "on"
 						full_page_writes:      "on"
 					}
+					if len(release.runtime) == 0 {
+						max_replication_slots: "\(list.Max([32, streams]))"
+						max_wal_senders:       "\(list.Max([10, streams]))"
+					}
+					max_slot_wal_keep_size: "\(release.database.slotWalKeepMB)MB"
+				}
+				postgresql: parameters: {
+					for k, v in base if release.database.parameters[k] == _|_ {(k): v}
+					release.database.parameters
+				}
+				// Standbys (release.cue's database.instances): synchronous replication and slots.
+				if release.database.instances > 1 {
+					postgresql: synchronous: release.database.synchronous
+				}
+				if release.database.haSlots {
+					replicationSlots: highAvailability: enabled: true
+				}
+				if release.database.instances > 1 || !release.database.enablePDB {
+					enablePDB: release.database.enablePDB
 				}
 				// A stop is bounded: a smart shutdown waits for sessions for 15 s, then a fast one, and
 				// at 120 s the pod is killed. CloudNativePG's default waits 1800 s, and Electric's
@@ -907,6 +931,14 @@ import (
 								}
 							},
 							{name: "ELECTRIC_MANUAL_TABLE_PUBLISHING", value: "true"},
+							// Electric 1.8.1 names its slot, and the advisory lock behind it, by the stream id,
+							// shared by every replica: a second one waited on the lock and never served. Each
+							// replica takes a temporary slot of a random name, its own, which Postgres drops with
+							// its connection and which holds no WAL once it is gone (PRONTO-363, as gcp.cue's
+							// Cloud Run). The publication stays the default stream's; the permanent slot it held
+							// before, electric_slot_default, the release drops (drop-retired-electric-slot).
+							{name: "CLEANUP_REPLICATION_SLOTS_ON_SHUTDOWN", value: "true"},
+							{name: "ELECTRIC_TEMPORARY_REPLICATION_SLOT_USE_RANDOM_NAME", value: "true"},
 						]
 						resources: (#resourcesOf & {r: release, n: "electric"}).out
 						livenessProbe: {
@@ -1015,6 +1047,8 @@ import (
 							{name: "WEBAUTHN_RP_ID", value: authRpId},
 							{name: "WEBAUTHN_ORIGIN", value: authOrigin},
 							if release.auth.android != "" {{name: "WEBAUTHN_ANDROID_ORIGINS", value: release.auth.android}},
+							if release.auth.apiKeysGate != "" {{name: "AUTH_API_KEYS", value: "true"}},
+							if release.auth.apiKeysGate != "" {{name: "AUTH_API_KEYS_GATE", value: release.auth.apiKeysGate}},
 							for k, v in release.auth.oidc {{name: k, value: v}},
 								for k in release.auth.oidcSecrets {{
 									name: k
@@ -1316,11 +1350,24 @@ import (
 		let exportName = "\(release.id)-metrics-export"
 		let labels = appLabels & {"app.kubernetes.io/component": "metrics-export"}
 		let config = {
+			// Each pod of a service, found through the API (PRONTO-370): with several, a scrape of the
+			// Service hit one pod at random, and a counter kept in memory read as whichever answered.
+			// Every series names its pod, as the cluster's VictoriaMetrics' do, so a panel sums over pods.
 			receivers: prometheus: config: scrape_configs: [for sn, s in release.services if s.metrics != _|_ {
 				job_name:        sn
 				scrape_interval: x.interval
 				metrics_path:    s.metrics.path
-				static_configs: [{targets: ["\(sn).\(release.ns).svc.cluster.local:\(s.metrics.port)"]}]
+				kubernetes_sd_configs: [{
+					role: "pod"
+					namespaces: names: [release.ns]
+					selectors: [{role: "pod", label: "app.kubernetes.io/name=\(release.id),app.kubernetes.io/component=\(sn)"}]
+				}]
+				relabel_configs: [
+					{source_labels: ["__meta_kubernetes_pod_phase"], regex: "Running", action: "keep"},
+					// The collector expands $ itself: $$ is a regex group's.
+					{source_labels: ["__meta_kubernetes_pod_ip"], target_label: "__address__", replacement: "$${1}:\(s.metrics.port)"},
+					{source_labels: ["__meta_kubernetes_pod_name"], target_label: "pod"},
+				]
 			}]
 			processors: {
 				resource: attributes: [
@@ -1342,6 +1389,18 @@ import (
 			apiVersion: "v1"
 			kind:       "ServiceAccount"
 			metadata: {name: exportName, namespace: release.ns, "labels": labels}
+		}, {
+			// It lists the namespace's pods to scrape each one, and reads nothing else.
+			apiVersion: "rbac.authorization.k8s.io/v1"
+			kind:       "Role"
+			metadata: {name: exportName, namespace: release.ns, "labels": labels}
+			rules: [{apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"]}]
+		}, {
+			apiVersion: "rbac.authorization.k8s.io/v1"
+			kind:       "RoleBinding"
+			metadata: {name: exportName, namespace: release.ns, "labels": labels}
+			roleRef: {apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: exportName}
+			subjects: [{kind: "ServiceAccount", name: exportName, namespace: release.ns}]
 		}, {
 			apiVersion: "v1"
 			kind:       "ConfigMap"

@@ -1,6 +1,10 @@
 package schema
 
-import "strings"
+import (
+	"regexp"
+	"strconv"
+	"strings"
+)
 
 // #Environment defines the infrastructure profile for target clusters.
 #Environment: {
@@ -52,6 +56,10 @@ import "strings"
 	// off elsewhere unless set. Dapr is the cluster's,
 	// shared by every app: once a release finds it in HA, it keeps it so, whatever its own says.
 	dapr: ha: bool | *(name == "metal")
+	// The replicas of each operator's controllers (Envoy Gateway, CloudNativePG, the barman-cloud
+	// plugin, External Secrets, cert-manager), set by the release after each install: leader-elected,
+	// so two is n+1. On by default on metal, which runs the apps' production (PRONTO-361).
+	controllers: int & >=1 | *[if name == "metal" {2}, 1][0]
 }
 
 // #ReleaseSpec defines a Pronto application workload intent independent of the target cluster.
@@ -113,10 +121,34 @@ import "strings"
 	}
 
 	database: {
-		storage: string | *"1Gi"
+		// The database's volume. An app states it (PRONTO-363): every slot's WAL cap is a share of it.
+		storage: *"1Gi" | =~"^[1-9][0-9]*(Mi|Gi|Ti)$"
+		let sizeOf = regexp.FindSubmatch("^([0-9]+)(Mi|Gi|Ti)$", storage)
+		// The most WAL a replication slot may hold, in MB (Postgres's max_slot_wal_keep_size): a
+		// replica that hangs while still connected (an Electric, a standby) keeps its slot and the WAL
+		// behind it, and past this the slot is given up rather than the disk filled. A quarter of the
+		// volume.
+		slotWalKeepMB: int & >=64 | *div(strconv.Atoi(sizeOf[1])*{Mi: 1, Gi: 1024, Ti: 1048576}[sizeOf[2]], 4)
 		// CloudNativePG's instances: one primary and instances-1 standbys, for which the operator
 		// keeps a PodDisruptionBudget itself. A preview runs as many.
 		instances: int & >=1 | *1
+		// With standbys (instances over one), CloudNativePG's quorum-based synchronous replication:
+		// a commit waits for `number` standbys (`method` any of them, or the first in order), and a
+		// primary that has lost them keeps accepting writes under `dataDurability` "preferred"
+		// rather than stalling ("required"). One instance renders none of it, as before (PRONTO-365).
+		synchronous: {
+			method:         *"any" | "first"
+			number:         int & >=1 | *1
+			dataDurability: *"preferred" | "required"
+		}
+		// Replication slots for the standbys, kept on every instance, so a standby promoted to
+		// primary still holds the others' (CloudNativePG's replicationSlots.highAvailability).
+		haSlots: bool | *(instances > 1)
+		// CloudNativePG's own PodDisruptionBudgets (its default, on). With one instance a budget
+		// blocks a drain: docs/move-to-contabo.md's drains pass --disable-eviction.
+		enablePDB: bool | *true
+		// Postgres parameters of the app's own over CloudNativePG's (max_slot_wal_keep_size, say).
+		parameters: [string]: string
 		// The roles a token may name, which the schema grants PostgREST's login
 		// (the app's .pronto/cluster.json; the release fills it).
 		tokenRoles: [...string]
@@ -181,6 +213,10 @@ import "strings"
 		// The SHA-256 fingerprints of the app's Android release certificates,
 		// comma-separated, as compose gives auth WEBAUTHN_ANDROID_ORIGINS.
 		android: *"" | string
+		// The app's gate over its API keys (capabilities.auth.apiKeysGate), as
+		// compose gives auth AUTH_API_KEYS_GATE: named, keys are on and the
+		// gate answers for each request, so its flag decides.
+		apiKeysGate: *"" | =~"^[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*$"
 	}
 
 	runtime: [string]: {
