@@ -317,7 +317,7 @@ def test_schema_jobs [] {
 	assert ($yaml | str contains "port: 6443")
 	# One Service per component under its compose name; the database's on
 	# CloudNativePG's current role label, routes only from the app's namespace.
-	assert equal ($yaml | from yaml | where kind == "Service" | get metadata.name | sort) ["auth" "caddy" "crud" "database" "electric" "render"]
+	assert equal ($yaml | from yaml | where kind == "Service" | get metadata.name | sort) ["auth" "caddy" "crud" "database" "electric" "electric-pods" "render"]
 	assert ($yaml | str contains "cnpg.io/instanceRole: primary")
 	assert not ($yaml | str contains "from: All")
 	# caddy's tracing exports OTLP over gRPC, Deno over HTTP.
