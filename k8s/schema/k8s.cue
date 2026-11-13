@@ -1333,6 +1333,7 @@ import (
 		app:         release
 		environment: targetEnv
 		images: {for name, _ in release.runtime {(name): (#appImage & {svc: name}).out}}
+		origin: originValue
 	}).objects
 
 	// objects collects all generated Kubernetes API definitions in standard order
