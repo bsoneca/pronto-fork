@@ -15,6 +15,6 @@ permissions:
 
 jobs:
   board:
-    uses: bsoneca/pronto-plugins/.github/workflows/devflow-board.yml@main
+    uses: bsoneca/pronto-plugins/.github/workflows/devflow-board.yml@67185e011e18894b35d36a9e286be349136ab8ce # main, PRONTO-479
     secrets:
       PLANE_TOKEN: ${{ secrets.PLANE_TOKEN }}
