@@ -277,7 +277,10 @@ import (
 				}, {
 					// PostgREST's login. The operator revokes any membership this
 					// list leaves out, so it names every role a token can: the
-					// schema's, which exist only once initdb has run.
+					// schema's, which the schema alone creates, 001_roles.sql on a
+					// fresh database and its `roles` reconcile on every release;
+					// the release then has the operator reconcile authenticator
+					// against them (release.nu).
 					name:    "authenticator"
 					ensure:  "present"
 					login:   true
@@ -590,6 +593,12 @@ import (
 					psql -XqAc "COMMENT ON DATABASE \\"$POSTGRES_DB\\" IS 'pronto initdb'"
 					"""]
 			}).out
+		},
+		// The ledger's upgrade, which compose runs between the database and
+		// migrate: a retained ledger brought up to its current column and job
+		// key, by the app's own image of it.
+		if release.type == "pronto" && release.airlock != _|_ {
+			(schemaJob & {component: "airlock-upgrade", svc: "airlock-upgrade", env: schemaEnv}).out
 		},
 		if release.type == "pronto" && release.migrate != _|_ {
 			(schemaJob & {
@@ -2207,8 +2216,9 @@ import (
 					},
 					{
 						from: [{
-							podSelector: matchLabels: {
-								"app.kubernetes.io/name": release.id
+							podSelector: {
+								matchLabels: "app.kubernetes.io/name": release.id
+								matchExpressions: [#notBridge]
 							}
 						}]
 						ports: [
@@ -2340,7 +2350,13 @@ import (
 							if release.render.enabled {{port: release.render.port, protocol: "TCP"}},
 						]
 					},
+					// PostgREST's admin port, for the kubelet's probes, which come
+					// from the pod's node and need no rule; any pod but a bridge.
 					{
+						from: [{
+							namespaceSelector: {}
+							podSelector: matchExpressions: [#notBridge]
+						}]
 						ports: [{port: 3001, protocol: "TCP"}]
 					},
 					{
@@ -2353,8 +2369,9 @@ import (
 					},
 					{
 						from: [{
-							podSelector: matchLabels: {
-								"app.kubernetes.io/name": release.id
+							podSelector: {
+								matchLabels: "app.kubernetes.io/name": release.id
+								matchExpressions: [#notBridge]
 							}
 						}]
 						ports: [
@@ -2449,8 +2466,9 @@ import (
 				ingress: [
 					{
 						from: [{
-							podSelector: matchLabels: {
-								"app.kubernetes.io/name": release.id
+							podSelector: {
+								matchLabels: "app.kubernetes.io/name": release.id
+								matchExpressions: [#notBridge]
 							}
 						}]
 						ports: [{port: 5432, protocol: "TCP"}]
@@ -2521,7 +2539,18 @@ import (
 		app:         release
 		environment: targetEnv
 		images: {for name, _ in release.runtime {(name): (#appImage & {svc: name}).out}}
-		origin: originValue
+	}).objects
+
+	let airlockObjects = (#Airlock & {
+		app:         release
+		environment: targetEnv
+		origin:      originValue
+		images: {
+			if release.airlock != _|_ {
+				for svc in ["airlock", "airlock-mesh"] {(svc): (#appImage & {"svc": svc}).out}
+				for _, b in release.airlock.bridges {(b.build): (#appImage & {svc: b.build}).out}
+			}
+		}
 	}).objects
 
 	// objects collects all generated Kubernetes API definitions in standard order
@@ -2556,6 +2585,7 @@ import (
 			// What the app's compose project runs beside the cluster (App.runtime, runtime.cue); the
 			// metal path names its services in App.services instead, so it is empty there.
 			runtimeObjects,
+			airlockObjects,
 			gatewayObj,
 			httpRouteObj,
 			serviceHostRouteObjs,

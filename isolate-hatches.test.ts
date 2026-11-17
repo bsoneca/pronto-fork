@@ -165,11 +165,11 @@ Deno.test("an isolate may sit at the app's root, and its WebAssembly files have 
   assertStringIncludes(res.stderr, "isolate hatch pdf has two files named add.wasm.js");
 });
 
-// A stock isolate is pronto's own module: the hatch names it, and the
-// emission writes it into the app, where its build reads it as any other.
-Deno.test("a stock isolate is pronto's module, written into the app", async () => {
-  const stock = '{kind: "isolate", note: "renders receipts", stock: "pdf", memory: 96}';
-  const files = await emitFiles(program('{isolate: "pdf", targets: ["docker", "cloudflare"]}', stock)) as unknown as Record<string, { format: string; text?: string; data?: { bridges?: { isolate: { entrypoint: string; files: string[] } }[] } }>;
+// A published isolate is pronto's own module: the hatch names it by `uses`,
+// and the emission writes it into the app, where its build reads it as any other.
+Deno.test("a published isolate is pronto's module, written into the app", async () => {
+  const uses = '{kind: "isolate", note: "renders receipts", uses: "pronto/pdf", memory: 96}';
+  const files = await emitFiles(program('{isolate: "pdf", targets: ["docker", "cloudflare"]}', uses)) as unknown as Record<string, { format: string; text?: string; data?: { bridges?: { isolate: { entrypoint: string; files: string[] } }[] } }>;
   const sources = ["main.ts", "deno.json", "deno.lock"];
   for (const f of sources) {
     const written = files[`.pronto/isolates/pdf/${f}`];
@@ -189,14 +189,30 @@ Deno.test("a stock isolate is pronto's module, written into the app", async () =
   // pdfmake is pinned to one version, the lock's.
   assertStringIncludes(files[".pronto/isolates/pdf/deno.json"].text!, '"npm:/pdfmake@0.3.13/"');
 
-  // The module is pronto's: a hatch naming a stock isolate names no module of its own.
-  const res = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', stock.replace('stock: "pdf"', 'stock: "pdf", entrypoint: "isolates/pdf/main.ts"')));
-  assert(!res.success, "a stock isolate with an entrypoint of its own was accepted");
+  // The module is pronto's: a hatch using a published isolate names no module of its own.
+  const res = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', uses.replace('uses: "pronto/pdf"', 'uses: "pronto/pdf", entrypoint: "isolates/pdf/main.ts"')));
+  assert(!res.success, "a published isolate with an entrypoint of its own was accepted");
   assertStringIncludes(res.stderr, "hatches.pdf.entrypoint: conflicting values");
-  const unknown = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', stock.replace('stock: "pdf"', 'stock: "xlsx"')));
-  assert(!unknown.success, "a stock isolate pronto does not ship was accepted");
-  assertStringIncludes(unknown.stderr, "hatches.pdf.stock: conflicting values");
-  const container = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', '{kind: "container", note: "a native transport", stock: "pdf"}'));
-  assert(!container.success, "a container hatch naming a stock isolate was accepted");
-  assertStringIncludes(container.stderr, "hatches.pdf.stock: field not allowed");
+  // `uses` names a published isolate by its publisher and name, one pronto ships.
+  for (const name of ["pronto/xlsx", "pdf", "acme/pdf", "pronto/pdf/"]) {
+    const unknown = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', uses.replace('"pronto/pdf"', JSON.stringify(name))));
+    assert(!unknown.success, `uses: ${name} was accepted`);
+    assertStringIncludes(unknown.stderr, "hatches.pdf.uses: ");
+  }
+  const container = await cue(["export", "-", "-e", "out"], program('{isolate: "pdf"}', '{kind: "container", note: "a native transport", uses: "pronto/pdf"}'));
+  assert(!container.success, "a container hatch using a published isolate was accepted");
+  assertStringIncludes(container.stderr, "hatches.pdf.uses: field not allowed");
+});
+
+// On k8s an isolate is a container bridge like any: a Deployment of the
+// image `<hatch>-appliance` builds, whose process is the host serving the
+// bundle on the bridge's port, which the airlock's daprd dials by the hatch's
+// name.
+Deno.test("an isolate on k8s runs its hatch's image, reached by the hatch's name", async () => {
+  const files = await emitFiles(program('{isolate: "pdf", targets: ["k8s"]}')) as unknown as Emitted & Record<string, { data: { endpoints?: unknown } }>;
+  assertEquals(files["services/airlock/effects.json"].data.effects!.charge.bridge, { name: "fetch", targets: ["k8s"], simulated: false });
+  assertEquals(files[".pronto/cluster.json"].data.endpoints, { k8s: { charge: "http://pdf:8080" } });
+  const target = (files["bayt.json"].data as unknown as { targets: Record<string, { entrypoint: { do: string }; dockerfile: { workdir: string } }> }).targets["pdf-appliance"];
+  assertEquals(target.entrypoint.do, `exec deno 'run' '--no-config' '--allow-net' '--allow-read' '--allow-run' '--allow-sys=networkInterfaces' '.isolate/pdf/host.js' '.isolate/pdf/entry.js' "$PORT" '50000' '96'`);
+  assertEquals(target.dockerfile.workdir, "/isolate");
 });

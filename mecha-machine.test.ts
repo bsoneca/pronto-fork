@@ -727,38 +727,23 @@ Deno.test("a sink's target entry wins, the rest take its default, and a target l
   // time as not deployed (container-bridges.md#Targets).
   const settled = await emitFiles(bridged(MAIL_BRIDGE, `sink: {bridge: "mail", idempotent: false}\n      reentry: "repeat"`).replace("targets: []", 'targets: ["cloudflare"]'));
   assertEquals(JSON.parse(JSON.stringify(settled["services/airlock/effects.json"])).data.effects.charge.bridge.targets, []);
-  assertStringIncludes(await refusal(bridged(MAIL_BRIDGE, `sink: {origin: "https://a.example", targets: docker: {origin: "https://b.example", bridge: "mail"}, idempotent: true}`)), "names one of origin, bridge and service for target docker");
+  assertStringIncludes(await refusal(bridged(MAIL_BRIDGE, `sink: {origin: "https://a.example", targets: docker: {origin: "https://b.example", bridge: "mail"}, idempotent: true}`)), "names one of origin and bridge for target docker");
   assertStringIncludes(await refusal(bridged(MAIL_BRIDGE, `sink: {origin: "https://a.example", targets: local: bridge: "mail", idempotent: true}`)), "local");
   assertStringIncludes(await refusal(bridged(MAIL_BRIDGE, `sink: {origin: "https://a.example", targets: docker: origin: "http://plain.example", idempotent: true}`)), "plain.example");
 });
 
-Deno.test("on k8s alone a sink may be an in-cluster service, which a Kubernetes release reads from cluster.json", async () => {
-  const k8sSinks = async (sink: string, bridges = "") => {
+Deno.test("a sink's k8s endpoint is written to cluster.json, where a Kubernetes release reads it", async () => {
+  const endpoints = async (sink: string, bridges = "") => {
     const files = await emitFiles(bridged(bridges, sink).replace("targets: []", 'targets: ["k8s"]'));
-    return JSON.parse(JSON.stringify(files[".pronto/cluster.json"])).data.k8sSinks;
+    return JSON.parse(JSON.stringify(files[".pronto/cluster.json"])).data.endpoints.k8s;
   };
-  assertEquals(await k8sSinks(`sink: {origin: "https://a.example", targets: k8s: service: {name: "ledger", namespace: "payments", path: "/v1"}, idempotent: true}`), {
-    charge: { service: { name: "ledger", namespace: "payments", port: 80, targetPort: 80, path: "/v1" } },
-  });
-  assertEquals(await k8sSinks(`sink: {origin: "https://a.example", targets: k8s: service: {name: "ledger", namespace: "payments", port: 8081, targetPort: 9000, podSelector: app: "ledger"}, idempotent: true}`), {
-    charge: { service: { name: "ledger", namespace: "payments", port: 8081, targetPort: 9000, podSelector: { app: "ledger" } } },
-  });
-  // A simulator on the stack every app launches on, the cluster's own service on k8s.
-  assertEquals(await k8sSinks(`sink: {bridge: "mail", targets: k8s: service: {name: "ledger", namespace: "payments"}, idempotent: false}\n      reentry: "repeat"`, MAIL_BRIDGE), {
-    charge: { service: { name: "ledger", namespace: "payments", port: 80, targetPort: 80 } },
-  });
   // The default where k8s names none, as on every target.
-  assertEquals(await k8sSinks(`sink: {origin: "https://a.example", idempotent: true}`), { charge: { origin: "https://a.example" } });
-  for (const t of ["docker", "cloudflare", "gcp", "aws"]) {
-    assertStringIncludes(await refusal(bridged("", `sink: {origin: "https://a.example", targets: ${t}: service: {name: "ledger", namespace: "payments"}, idempotent: true}`)), "service");
-  }
-  assertStringIncludes(await refusal(bridged("", `sink: {origin: "https://a.example", targets: k8s: {origin: "https://b.example", service: {name: "ledger", namespace: "payments"}}, idempotent: true}`)), "names one of origin, bridge and service for target k8s");
-  assertStringIncludes(await refusal(bridged("", `sink: {origin: "https://a.example", targets: k8s: service: {name: "Ledger.x", namespace: "payments"}, idempotent: true}`)), "name");
+  assertEquals(await endpoints(`sink: {origin: "https://a.example", idempotent: true}`), { charge: "https://a.example" });
   // A named origin is the edge's: a program declaring k8s is refused, with the reason, and one that
   // does not leaves the effect no sink on k8s, which the release names before it renders anything.
-  assertStringIncludes(await refusal(bridged("", `sink: {origin: "https://a.example", targets: {docker: origin: "https://a.example", k8s: origin: {secret: "VENDOR_URL"}}, idempotent: true}`).replace("targets: []", 'targets: ["k8s"]')), "names its origin by the secret VENDOR_URL, which only cloudflare reads: give target k8s an origin or a bridge");
+  assertStringIncludes(await refusal(bridged("", `sink: {origin: "https://a.example", targets: {docker: origin: "https://a.example", k8s: origin: {secret: "VENDOR_URL"}}, idempotent: true}`).replace("targets: []", 'targets: ["k8s"]')), "names its origin by the secret VENDOR_URL");
   const undeclared = await emitFiles(bridged("", `sink: {origin: "https://a.example", targets: {docker: origin: "https://a.example", k8s: origin: {secret: "VENDOR_URL"}}, idempotent: true}`));
-  assertEquals(JSON.parse(JSON.stringify(undeclared[".pronto/cluster.json"])).data.k8sSinks, { charge: null });
+  assertEquals(JSON.parse(JSON.stringify(undeclared[".pronto/cluster.json"])).data.endpoints.k8s, { charge: null });
 });
 
 // Regression: the origin was compiled into effects.json, so one tree could not

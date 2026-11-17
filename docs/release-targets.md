@@ -1,7 +1,7 @@
 ---
 type: concept
 title: Release targets
-description: "Where a program is released: each target in meta.targets becomes a sayt release@<target> rule carrying the whole app on one tier of mecha's ladder; pages, cloudflare, docker and gcp are built, and the other clouds and k8s are designed."
+description: "Where a program is released: each target in meta.targets becomes a sayt release@<target> rule carrying the whole app on one tier of mecha's ladder; pages, cloudflare, docker, gcp and k8s are built, and aws and azure are designed."
 ---
 
 # Release targets
@@ -26,17 +26,17 @@ and [not built](../PENDING.md#release-targets). How an author releases an app is
   `@`. `release` and `verify` default to `preview`.
 - A pronto **target** is a place a program is released to and verified
   against: `#Target` in `schema.cue`, which admits `pages`, `cloudflare`,
-  `docker`, `gcp` and `aws`, and not `azure` or `k8s`.
+  `docker`, `k8s`, `gcp` and `aws`, and not `azure`.
 - A mecha **tier** is what the cluster is made of there. The ladder is
   mecha's: browser, CLI, single machine, k8s, cloud and edge
-  ([invariant 4](https://github.com/bonisoft3/mecha/blob/v0.25.0/README.md#4-vertical-scalability-down-and-up)).
+  ([invariant 4](https://github.com/bonisoft3/mecha/blob/v0.25.1/README.md#4-vertical-scalability-down-and-up)).
   pronto's `#Tier` names five of its rungs — `browser`, `edge`, `container`,
   which is mecha's single machine, `k8s`, and `cloud` — and the browser, the
   edge, and the container are built. `container` is where every app develops,
   and for release it is the `docker` target: the SQL fence `-- tier:
   container` … `-- tier: any` around the publication and the replica identity,
   the statements that need a WAL reader
-  ([the fence](https://github.com/bonisoft3/mecha/blob/v0.25.0/docs/browser.md#the-fence)).
+  ([the fence](https://github.com/bonisoft3/mecha/blob/v0.25.1/docs/browser.md#the-fence)).
 
 | target | tier | the artifact | the door |
 |---|---|---|---|
@@ -155,7 +155,7 @@ applying migrations, so declared collations retain case and accent semantics
 offline. ICU and PGlite versions are pinned together in the browser runtime;
 this is part of the database contract and requires no application setting. The
 page's fetch shim serves the table by path and hands `/crud`, `/auth` and
-`/electric` to [the one-user cluster](https://github.com/bonisoft3/mecha/blob/v0.25.0/docs/browser.md#the-one-user-cluster),
+`/electric` to [the one-user cluster](https://github.com/bonisoft3/mecha/blob/v0.25.1/docs/browser.md#the-one-user-cluster),
 which mints its user at boot, so the tenancy floor runs against a real subject
 and there is no door. A program begins as one HTML file, `ir.html`, and ships
 as one.
@@ -230,7 +230,7 @@ a broken release, for a program with:
   cloudflare target refuses one too.
 
 **The page runs its drains and its clock**
-([mecha's dispatcher](https://github.com/bonisoft3/mecha/blob/v0.25.0/docs/browser.md#drains-and-the-clock)):
+([mecha's dispatcher](https://github.com/bonisoft3/mecha/blob/v0.25.1/docs/browser.md#drains-and-the-clock)):
 the bundler carries the drains from `.pronto/cluster.json` and places mecha's
 `schedule` table before the seed, as the edge's data directory does
 ([`edge-scripts.ts`](../bundle/edge-scripts.ts)). The clock runs while the
@@ -392,7 +392,7 @@ renderer, database and app entry that use them. The database object retains
 captures, retries and publication receipts. A separate `ComputeCoordinator` object
 owns the computation alarm and dispatch; companion execution owns only scratch
 state. The database object's alarm continues to serve schedules and drains even
-when a computation is slow or exhausted. See [the computation contract](https://github.com/bonisoft3/mecha/blob/v0.25.0/docs/compute.md#cloudflare-snapshot-execution).
+when a computation is slow or exhausted. See [the computation contract](https://github.com/bonisoft3/mecha/blob/v0.25.1/docs/compute.md#cloudflare-snapshot-execution).
 
 A new deployment can opt into `--ssr-database separate`: it writes
 `database.jsonc` for `<app>-database` with compressed 128 KiB filesystem blocks,
@@ -427,7 +427,7 @@ a row names: each file, named by its sha256, goes to blob storage at `seed/<file
 the publish here and by a one-shot `seed-blobs` target in a cluster, and is then an
 object like any other. Pages has no blob storage, and inlines them
 ([pages](#pages)). An effect's answered bytes are written at run time to the same
-bucket ([the airlock's blobs](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/airlock/README.md#a-handler)).
+bucket ([the airlock's blobs](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/airlock/README.md#a-handler)).
 A session's upload is a claim first, `POST /blob-claim/<key>`, and then `PUT
 /blobs/mecha-objects/<key>`, as behind the container's door; the plane's budget of claims is
 what bounds guests, whose ids are free. A bridge naming `cloudflare` runs as a
@@ -437,7 +437,7 @@ settle failed without a call ([targets](container-bridges.md#targets)).
 An app with effects runs them in a second Worker, `<object script>-airlock`, the
 consumer of a queue of the same name that the script holding the object produces
 to ([edge-dispatcher.ts](../bundle/edge-dispatcher.ts), mecha-edge's
-[effects](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md#effects)): the
+[effects](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md#effects)): the
 object never waits on an effect's network. The publish creates the queue when it
 is missing and deploys the dispatcher after the object's script, which its
 binding names. The dispatcher alone holds the secrets its effects declare and the
@@ -446,13 +446,13 @@ OpenAI): each is set from the publish's environment, or must already be the
 deployed dispatcher's, or the publish is refused.
 
 The release also contains PGlite for workerd in `pglite/`, baked from mecha's pinned sources
-([pglite-workerd](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/pglite-workerd/README.md))
+([pglite-workerd](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/pglite-workerd/README.md))
 ([`edge-pglite.ts`](../bundle/edge-pglite.ts)): with `EDGE_BUILD_PROJECT=<project>` in that
 project's Cloud Build, kept in `gs://<project>-pronto-edge` under a hash of those sources, so
 the next release on the same mecha downloads it and the machine releasing needs no Docker;
 without it, by the local Docker;
 the data directory in `pgdata/`; and a Worker in `src/index.ts` exporting
-[mecha's edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md)
+[mecha's edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md)
 as its one Durable Object, over the shell's tables. `publish` runs
 [`publish-edge.ts`](../bundle/publish-edge.ts): `wrangler deploy` at the
 version pglite-workerd's `mise.toml` pins, with `JWT_SECRET` (once) and a new
@@ -505,7 +505,7 @@ What fixes its shape, as built:
   `--from=<dir>` starts it from a directory built elsewhere
   instead, an archive restored from its database with the ledger of what that
   database applied
-  ([`restore.ts`](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/pglite-workerd/restore.ts)),
+  ([`restore.ts`](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/pglite-workerd/restore.ts)),
   applies the release's scripts the ledger lacks as a publish applies them to
   a kept directory (below), and skips the derivation.
 - **Loading is once, and a later release migrates.** The object opens only
@@ -535,7 +535,7 @@ What fixes its shape, as built:
   deployed Workers because the migration may have committed. `--reset` loads a
   directory built for this release.
 - **One object, every user behind one writer.** PGlite is one connection.
-  [`createRestHandler`](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/postgrest-js/src/rest-handler.ts)
+  [`createRestHandler`](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/postgrest-js/src/rest-handler.ts)
   opens each request with a transaction-local role, `app.scopes` and
   `request.jwt.claims`, so a shared connection never leaks a subject, and row
   policy is Postgres's own here as on a single machine.
@@ -559,7 +559,7 @@ What fixes its shape, as built:
   by the object's epoch; a public table's chunks are every guest's.
 - **The drains run in the object**, called as their tables change and once
   after every boot that serves, a failed one's retry at the alarm
-  ([the edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md#drains)).
+  ([the edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md#drains)).
   A drain's writes reach a guest's cached `/crud` read once its 5 seconds pass,
   and a cached render once its minute does, as every write the object makes
   itself; the shape stream carries them at once.
@@ -619,10 +619,10 @@ one oversized numerical job fit.
 An app's machines step in the object: the migration declares each step over
 an engine the tier supplies, and the object's is PGlite for workerd's host
 import, handed the machines `edge.ts` renders from the app's rules
-([the edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md#machines)).
+([the edge cluster](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md#machines)).
 A deadline a machine arms and a cron schedule the program declares are the
 object's alarm, swept as the ticker sweeps them
-([the clock](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md#the-clock)).
+([the clock](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md#the-clock)).
 For a frozen archive, `code.meta.edgeClock: "disabled"` emits `--clock disabled`:
 the object preserves schedule rows but runs no schedule ticks, and no schedule
 Cron Trigger is written. Drain retry and computation deadlines still arm the
@@ -1238,25 +1238,23 @@ applies:
 | `gcp` | gcloud ([built](#gcp)) | Cloud Run | Cloud SQL |
 | `aws` | ACK | ECS Express Mode on Fargate | Aurora Serverless v2, from 0.5 ACU |
 | `azure` | Azure Service Operator v2 | Container Apps | Flexible Server, B1ms |
-| `k8s` | skaffold, against a named kube context | mecha's images, scaled from zero by KEDA | CloudNativePG |
+| `k8s` | `kubectl`, applying manifests rendered from CUE, against a named kube context | mecha's images, Deployments at the release's `replicas` (1 unless set) | CloudNativePG |
 
 `k8s` is built for Kind and for a cluster the operator runs behind NAT
 (`envs.Metal`): its images built in Cloud Build and pulled from Artifact
 Registry, its door a Cloudflare Tunnel ([k8s/README.md](../k8s/README.md#12-metal-a-cluster-of-your-own-behind-nat)).
 On every cluster but metal it also deploys what the compose project runs
-beside the cluster, an app's effects included: mecha's airlock and its own
-daprd as two pods, each walled by a network policy as compose walls them with
-two networks, the effects' secrets read from Secrets the release names
-([k8s/docs/index.md](../k8s/docs/index.md#the-airlock)). Container bridges,
-the AI gateway, and a tenant's release or a preview of an app with effects are
-refused there.
+beside the cluster, an app's effects included: mecha's airlock, its daprd and
+its bridges, each walled by a network policy ([[release-targets#Effects on k8s]]).
+A tenant's release or a preview of an app with effects is refused there.
 
-The compute scales by itself; the floor is the database, and AWS's is the
-highest, since Aurora does not pause while logical replication is on. Project,
-account, region and domain are declarations on the cluster; credentials are
+The clouds' compute scales by itself, and k8s's holds the replicas the
+release states; the floor is the database, and AWS's is the highest, since
+Aurora does not pause while logical replication is on. Project, account,
+region and domain are declarations on the cluster; credentials are
 each cloud's own and never in the session. Region is the first of the axes a
 system shards along, before time and user. mecha's
-[clouds as built](https://github.com/bonisoft3/mecha/blob/v0.25.0/docs/deployment.md#clouds-as-built)
+[clouds as built](https://github.com/bonisoft3/mecha/blob/v0.25.1/docs/deployment.md#clouds-as-built)
 is the mapping these start from.
 
 A sign-in provider (`auth.providers`) is registered with the provider, told
@@ -1268,13 +1266,164 @@ The deployment overrides each as `OIDC_<NAME>_<SETTING>`, and gives what the
 program must not hold, Google's client secret as `OIDC_GOOGLE_CLIENT_SECRET`.
 Another OpenID issuer may stand in the provider's place, such as a broker an
 operator runs, by its issuer and the client `origin`
-(mecha's [provider sign-in](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/auth/README.md#provider-sign-in)).
+(mecha's [provider sign-in](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/auth/README.md#provider-sign-in)).
 Compose refuses to render the stack when neither gives a client id, and the
 k8s release copies the public `OIDC_*` settings onto the auth service. Nonempty
 client secrets go to a separate Kubernetes Secret through stdin; the Deployment
 holds only Secret references and a digest that rolls auth when secrets change.
 Client secret values never enter the rendered workload manifests or temporary
 release metadata.
+
+### Effects on k8s
+
+A program that declares effects gets on k8s what compose gives it, from
+compose's own images: the airlock, its daprd (`airlock-mesh`), the ledger's
+upgrade and the bridges named for k8s
+([`k8s/schema/airlock.cue`](../k8s/schema/airlock.cue)).
+
+- **The daprd is a pod of its own**, never the airlock's sidecar: a sidecar
+  shares its pod's network, so the airlock would reach whatever its daprd
+  does. It runs standalone, as compose's does, on its image's resources (the
+  wall, the breaker, the blob plane's binding) and with no injector, each
+  effect's endpoint mounted over the image's from a ConfigMap. The image's
+  endpoints are the compose stack's, the docker target's; an effect's sink on
+  k8s (`sink.targets.k8s`, else its default) is what `.pronto/cluster.json`
+  carries as `endpoints.k8s`, and one with none there is refused.
+- **Compose's networks are NetworkPolicies.** The airlock reaches the
+  cluster's resolver on port 53, the database and its daprd, and only the
+  ticker's wake reaches it, on its health port. The resolver is
+  kube-system's `k8s-app: kube-dns` pods and the addresses the kubelets hand
+  pods as theirs, a NodeLocal DNSCache's among them, which the release reads
+  from each node's kubelet configuration or the environment states as
+  `resolvers`; a release that can do neither is refused. Only the airlock reaches the daprd, which reaches the resolver,
+  the bridges, the blob plane and every address outside the private, shared,
+  link-local and loopback ranges and the cluster's own: the release reads its
+  nodes' addresses and pod ranges and the API server's endpoints, since any
+  may be public. Only the daprd reaches a bridge, which reaches the resolver
+  and those outside addresses alone. This holds where the network plugin
+  applies an `ipBlock` to pod and node traffic as Kubernetes documents it; a
+  plugin that rewrites addresses on the way out may show a peer another.
+  Kubernetes always lets a pod and its own node reach each other, which no
+  policy can close: on its node, a bridge or the daprd reaches what listens
+  there, the kubelet among them, which its own authentication holds, and no
+  pod of the three holds a token for the API. A declared name that resolves
+  inward, the compose stack's residual, is not reached here.
+- **A bridge is none of the app's.** The app's own services admit its pods
+  by the app's name, and none of them admits a pod labelled
+  `pronto.dev/bridge`, so a bridge reaches neither the database nor a service
+  even before its policy holds it; the door alone admits anyone, as it does
+  the world.
+- **The wall is checked.** Only a network plugin that enforces NetworkPolicy
+  applies one, and nothing in the API says whether it does. Before any of the
+  airlock's pods starts, its policies applied, a probe as each role, wherever
+  the scheduler places it, must reach the world as its policy says and not a
+  listener open to any pod, and a control must reach that listener, so a
+  plugin that enforces nothing is refused before any of the airlock's code
+  runs. Once the airlock runs, the release starts short-lived probes on the airlock's image, one
+  labelled as the airlock, one as its daprd and one as each bridge, beside
+  each node a ready pod of the one it stands for runs on, so the policies hold
+  each as they hold that pod. They try the world in each address family the
+  airlock's pods hold an address in (`1.1.1.1:443`,
+  `[2606:4700:4700::1111]:443`), and the Services below at each address of
+  each ready pod behind them, every family's, never by a name a failing
+  resolver could hide. The airlock's must reach its database and its daprd and
+  neither the world nor a bridge; the daprd's the world and each bridge but
+  not the database; a bridge's the world but neither the database, the daprd
+  nor another bridge. None may reach a listener the release starts beside
+  them, open to any pod, which only each one's own egress policy keeps it
+  from, so a pod whose policy is missing is found; a control no policy holds
+  must reach that listener and neither the airlock, its daprd nor a bridge,
+  which their ingress keeps it from. A probe that cannot reach what it may
+  shows nothing (a network that lets nothing out among them), so it fails the
+  release as one that reaches what it may not does. The probes start once the
+  listener serves, each repeats until its finding holds three rounds running,
+  and they are deleted either way. A release whose wall is not certified, or
+  whose rollouts fail between the first of those pods starting and the wall's
+  certificate, scales the airlock, its daprd and its bridges to zero, so
+  nothing runs behind a wall not certified; one that fails after, the wall
+  certified, leaves them running inside it. kind's kindnet enforces
+  them; EKS needs the VPC CNI's network policy agent, AKS a network policy
+  engine. A spec with `networkPolicy.enabled: false` is refused.
+- **The wall is the airlock's own policies alone.** Policies add up, so
+  another that selects one of its pods, in a namespace the app shares, would
+  open what its own close wherever the probes do not look: the release refuses
+  one, its own aside, that could select them by the labels it gives them or
+  any an admission webhook might add, before it starts any of those pods,
+  scaling to zero those an earlier release runs, and again by the labels the
+  pods were admitted with, and an app released into a namespace of
+  the cluster's own (`default`, `kube-system`, `kube-public`,
+  `kube-node-lease`, `cnpg-system`, `dapr-system`,
+  `observability`, `external-secrets`, `envoy-gateway-system`), whose services
+  admit every pod of theirs and whose Services, the API server's among them,
+  a bridge's of the same name would take.
+- **What the wall is made of.** Kubernetes' NetworkPolicies alone, for TCP
+  and UDP as they define. A plugin's own policies (Cilium's, Calico's) that
+  select the airlock's pods are outside what the release checks and may add
+  to the wall's allowances, as may a plugin that lets through what
+  NetworkPolicy leaves undefined, ICMP among it: a cluster running either is
+  not one the release certifies, whatever its probes find. Its probes try
+  TCP; UDP the policies hold alike, and the release does not probe it.
+- **Where the wall holds.** On a plugin that holds a new pod to the policies
+  it has handled before the pod starts, as Kubernetes asks, from the pod's
+  first instant. One whose probe gets past the wall in any round does not,
+  and is refused unless the environment states `policiesLate`; kind's does, since kindnet lets a new pod's first connections through, and there
+  the wall is a development one: a bridge's first moments are outside its
+  own policy, the app's services refusing it all the same, and the
+  airlock's own Deno, allowed only the database, its daprd and its own port,
+  keeps it in meanwhile. The cluster's addresses are those of the release:
+  a node added since, its pod range among them, is excluded only from the
+  next release on, which matters where they are public. An address the
+  cluster serves to the internet, its door's among them, is the world's,
+  reached as any client of it reaches it. The probes certify the nodes the
+  pods ran on at the release, not those a pod moves to later.
+- **Secrets reach no manifest.** Every variable compose hands the airlock past
+  its wiring (`AIRLOCK_DIR`, `MESH_URL`, `BLOB_URL`, `PORT`) is an effect's
+  secret, which no effect may name as the wiring. Its value is read from the
+  release's own environment, never as compose resolved it (compose gives a
+  simulated effect's secret `simulator`), and a release whose environment
+  leaves one unset is refused. It is written to the Secret `<app>-airlock`
+  through stdin; the Deployment names each, and a digest of the values rolls
+  it when one changes. A bridge's environment goes as compose resolves it to
+  `<app>-bridge-<container>`.
+- **The seal key is the release's.** Where an effect reads a secret field,
+  the airlock opens it with `AIRLOCK_SEAL_KEY`, which the release takes from
+  its own environment into `<app>-airlock` as an effect's secret, beside
+  `AIRLOCK_SEAL_KEY_PREVIOUS` through a rotation (mecha's
+  `services/airlock/README.md#rotating-the-seal-key`); a change of either
+  rolls the airlock. It never makes one, refuses a release that sets none,
+  and refuses the repository's development key, the one compose's airlock
+  holds, however it is spelled; the airlock, never told it is the local
+  stack's (`AIRLOCK_SEAL_DEV`), refuses it too.
+- **A read goes out as an effect does**: its GET through the daprd, to the
+  sink its endpoint on k8s names, inside the same wall; its journal is
+  created by the ledger's upgrade below, on a fresh database and an older one
+  alike.
+- **The ledger's upgrade is a Job** on its compose image, after initdb and
+  before migrate as compose orders them. A database built before the program
+  declared its first effect has no queue or ledger, which only a fresh
+  database builds, so initdb refuses it, naming the cluster to delete.
+- **In the order the airlock goes out.** The bridges are applied with the
+  other Deployments and rolled out, then the daprd, whose endpoints name
+  them, then the airlock, so neither the airlock that runs nor its
+  successor spends an attempt on a bridge still starting. What an earlier
+  release deployed and this one does not, a bridge no longer on k8s or the
+  whole airlock where the program declares no effect, is removed. The
+  policies go first, so the wall never trails a pod: a release that moves an
+  effect from one bridge to another cuts the running daprd from the old one
+  before its successor serves, and a call meanwhile fails as a transport
+  does.
+- **The ticker wakes it** as in compose: `WAKE_URLS` names
+  `http://airlock:9997/healthz`, the airlock's Service.
+- **A bridge naming `k8s`** runs the image of its container's
+  `<container>-appliance` target, a container's or an isolate's, as a
+  Deployment behind a Service of the container's name, which the daprd dials
+  ([container bridges](container-bridges.md#k8s)). It stays at one replica:
+  nothing in front of it holds a call while it starts, so a call into a cold
+  bridge would fail as a transport does and spend an attempt. Its container's
+  name may not be one the release's own services hold.
+- **The AI gateway is not deployed.** Only the daprd calls it, so an effect
+  whose sink on k8s is the gateway is refused, and one that names another
+  sink for k8s (`sink.targets.k8s`) releases without it.
 
 ## Rejected
 
