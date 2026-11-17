@@ -51,11 +51,12 @@ _caddyfileAsset:   _ @embed(file="assets/Caddyfile", type=text)
 _cdcTypesAsset:    _ @embed(file="assets/cdc-types.blobl", type=text)
 _cdcCarriersAsset: _cdcTypesAsset
 
-// pronto's stock isolates, each a module of its own under isolates/<name>/,
-// which an isolate hatch names by `stock` and the emission writes into the app
-// under .pronto/isolates/<name>/, where the hatch's build reads it as it reads
-// any other ([[docs/isolate-hatches#Stock isolates]]).
-_stockIsolates: pdf: {
+// The isolates pronto publishes, each a module of its own under
+// isolates/<name>/, which an isolate hatch names by `uses: "pronto/<name>"` and
+// the emission writes into the app under .pronto/isolates/<name>/, where the
+// hatch's build reads it as it reads any other
+// ([[docs/isolate-hatches#Published isolates]]).
+_publishedIsolates: pdf: {
 	"main.ts":   {format: "js", text: _ @embed(file="isolates/pdf/main.ts", type=text)}
 	"deno.json": {format: "text", text: _ @embed(file="isolates/pdf/deno.json", type=text)}
 	"deno.lock": {format: "text", text: _ @embed(file="isolates/pdf/deno.lock", type=text)}
@@ -3112,6 +3113,23 @@ _traceHeader: include_patterns: ["^traceparent$"]
 	}
 }
 
+// The base URL of an effect's Dapr HTTPEndpoint on a release target: its
+// bridge's container by name and port, which a cluster's own name resolution
+// answers, the AI gateway, or its origin. Cluster-owned bridges and the AI
+// gateway use plain HTTP.
+#EndpointUrl: {
+	let U = self
+	sink:    _
+	target:  string
+	bridges: _
+	let at = (#SinkAt & {sink: U.sink, target: U.target}).out
+	out: [
+		if at.bridge != _|_ {"http://\(U.bridges[at.bridge].container):\(U.bridges[at.bridge].port)\([if U.bridges[at.bridge].action != _|_ {"/actions/\(U.bridges[at.bridge].action)"}, ""][0])"},
+		if at.ai != _|_ {"http://tsbifrost:\(mecha.#TsBifrostPort)"},
+		at.origin,
+	][0]
+}
+
 // Default runtime instances, parameterized by the code. program.cue wires
 // them; overrides land in bayt.cue by unification.
 //
@@ -5083,17 +5101,21 @@ _pgrollDir: "services/database/pgroll"
 				// The effect steps a page or edge release places among the
 				// migrations, where the program places them, and why it may.
 				if E.code.state.steps != _|_ {steps: {graphile: E._steps.graphile, airlock: E._steps.airlock, jobKey: E._steps.jobKey, note: E.code.state.steps.note}}
-				// Each effect's sink on a Kubernetes release, which writes the
-				// airlock's daprd's endpoints and egress from them (null: none).
+
+				// Each effect's endpoint on k8s, by effect: the base URL the k8s
+				// release mounts over the one the airlock daprd's image holds,
+				// which is the compose stack's and so the docker target's. null
+				// where k8s has no sink to reach: none, or an origin only
+				// cloudflare reads from a secret.
 				if E.code.state.effects != _|_ if len(E.code.state.effects) > 0 {
-					// An origin named by a secret is the dispatcher's read on cloudflare (#NamedOrigin) and a
-					// target that declares k8s refuses it at vet; where k8s is not declared the sink is none
-					// here, so the release names the effect rather than the render failing on it.
-					k8sSinks: {for n, x in E.code.state.effects {
+					let bridges = [if E.code.state.bridges != _|_ {E.code.state.bridges}, {}][0]
+					endpoints: k8s: {for n, x in E.code.state.effects {
 						let at = (#SinkAt & {sink: x.sink, target: "k8s"}).out
-						(n): [if at != null if at.origin != _|_ if at.origin.secret != _|_ {null}, at][0]
+						let url = [if at != null {(#EndpointUrl & {sink: x.sink, target: "k8s", "bridges": bridges}).out}, null][0]
+						(n): [if (url & string) != _|_ {url}, null][0]
 					}}
 				}
+
 				// The bridges a release lowers past the cluster: each container's
 				// port, release targets and the cluster target building its image,
 				// whose bayt files hold the Dockerfile and the resolved environment
@@ -5648,13 +5670,38 @@ _pgrollDir: "services/database/pgroll"
 							// Where the edge's airlock goes: it has no daprd to read an endpoint from.
 							let edge = (#SinkAt & {sink: i.effect.sink, target: "cloudflare"}).out
 							if list.Contains(E.code.meta.targets, "cloudflare") if edge != null if edge.origin != _|_ {edgeOrigin: edge.origin}
+							// The bridge the effect is settled by: its own, else the one its
+							// sink is on a release target past the compose stack's, where
+							// the airlock settles it not deployed as it would its own.
+							let named = [
+								if i.effect.sink.bridge != _|_ {i.effect.sink.bridge},
+								for t in ["cloudflare", "k8s"] let at = (#SinkAt & {sink: i.effect.sink, target: t}).out if at != null if at.bridge != _|_ {at.bridge},
+							]
+							// And the bridge the edge calls, where that is not it.
+							if list.Contains(E.code.meta.targets, "cloudflare") if edge != null if edge.bridge != _|_ if edge.bridge != named[0] {edgeBridge: edge.bridge}
+							// Or the AI gateway, where the bridge is another target's.
+							if list.Contains(E.code.meta.targets, "cloudflare") if edge != null if edge.ai != _|_ if len(named) > 0 {edgeAi: true}
 							if i.effect.endowments != _|_ {endowments: i.effect.endowments}
-							if i.effect.sink.bridge != _|_ {
-								let b = E.code.state.bridges[i.effect.sink.bridge]
+							if len(named) > 0 {
+								let local = (#SinkAt & {sink: i.effect.sink, target: "docker"}).out
 								bridge: {
-									name:      i.effect.sink.bridge
-									targets:   b.targets
-									simulated: b.simulator != _|_
+									name: named[0]
+									// The release targets where the effect's sink there is
+									// reachable: an origin, the AI gateway, or a bridge that
+									// target runs; the app's own targets past those a bridge
+									// may name among them.
+									// The airlock settles the effect not deployed
+									// elsewhere, so an effect whose own bridge runs
+									// only on docker but whose k8s sink is an origin
+									// is called on k8s.
+									targets: [for t in list.Concat([#BridgeTargets, [for t in E.code.meta.targets if t != "pages" if !list.Contains(#BridgeTargets, t) {t}]])
+									let at = (#SinkAt & {sink: i.effect.sink, target: t}).out
+									if at != null
+									if [if at.bridge != _|_ {list.Contains(E.code.state.bridges[at.bridge].targets, t)}, true][0] {t}]
+									// Whether the local stack, which takes docker's sink,
+									// calls it: an origin, or a bridge it runs a simulator
+									// of.
+									simulated: [if local != null if local.bridge != _|_ {E.code.state.bridges[local.bridge].simulator != _|_}, true][0]
 								}
 							}
 						}
@@ -5683,13 +5730,8 @@ _pgrollDir: "services/database/pgroll"
 						apiVersion: "dapr.io/v1alpha1"
 						kind:       "HTTPEndpoint"
 						metadata: name: i.effect.name
-						// Cluster-owned bridges and the AI gateway use plain HTTP.
-						let at = (#SinkAt & {sink: i.effect.sink, target: "docker"}).out
-						spec: baseUrl: [
-							if at.bridge != _|_ {"http://\(E.code.state.bridges[at.bridge].container):\(E.code.state.bridges[at.bridge].port)\([if E.code.state.bridges[at.bridge].action != _|_ {"/actions/\(E.code.state.bridges[at.bridge].action)"}, ""][0])"},
-							if at.ai != _|_ {"http://tsbifrost:\(mecha.#TsBifrostPort)"},
-							at.origin,
-						][0]
+						// The compose stack is the docker target's.
+						spec: baseUrl: (#EndpointUrl & {sink: i.effect.sink, target: "docker", bridges: [if E.code.state.bridges != _|_ {E.code.state.bridges}, {}][0]}).out
 					}
 				}
 				if i.effect.request == _|_ {
@@ -6527,8 +6569,10 @@ _pgrollDir: "services/database/pgroll"
 		if len([for _, h in E.code.capabilities.hatches if h.kind == "isolate" {h}]) > 0 {
 			".isolate/.gitignore": {format: "text", text: "*\n"}
 		}
-		for _, h in E.code.capabilities.hatches if h.kind == "isolate" if h.stock != _|_ for f, file in _stockIsolates[h.stock] {
-			".pronto/isolates/\(h.stock)/\(f)": file
+		for _, h in E.code.capabilities.hatches if h.kind == "isolate" if h.uses != _|_
+		let N = strings.TrimPrefix(h.uses, "pronto/")
+		for f, file in _publishedIsolates[N] {
+			".pronto/isolates/\(N)/\(f)": file
 		}
 		".pronto/development/shell.json": {
 			format: "json"

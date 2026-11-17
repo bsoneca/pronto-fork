@@ -9,7 +9,7 @@ program builds. A bridge reaches it as it reaches a container
 code: capabilities: hatches: pdf: {
     kind:   "isolate"
     note:   "renders receipts from plain data"
-    stock:  "pdf" // pronto's own module (Stock isolates, below)
+    uses:   "pronto/pdf" // pronto's own module (Published isolates, below)
     memory: 96    // MiB of V8's old space, from 16 to 128; 128 when unset
 }
 code: state: bridges: pdf: {isolate: "pdf", targets: ["docker", "cloudflare"]}
@@ -82,6 +82,7 @@ isolate's WebAssembly files share a name.
 |---|---|---|---|
 | the local stack, under its `simulator` or `simulator: {}` | a bayt target pronto generates (`#IsolateContainer`), whose one cmd builds the module and whose process serves it: bayt runs both in the image (Debian, Deno from its pinned image) and on the host alike | V8's old-space limit, `memory` | the host's deadline |
 | docker | a process of the appliance: the airlock's own Deno running the host and the build copied from the `<hatch>-appliance` image, on a port from 9100; the appliance refuses to start with its door's `PORT` on that port | V8's old-space limit, `memory` | the host's deadline |
+| k8s | a Deployment of the `<hatch>-appliance` image, whose process is the host serving its build on the bridge's port, reached by the hatch's name ([[release-targets#Effects on k8s]]) | V8's old-space limit, `memory`, inside the pod's | the host's deadline |
 | cloudflare | a Worker of its own, `<dispatcher>-<bridge>` (past 63 characters, its head and a hash of the whole), with no route, deployed before the dispatcher that binds it by service | the platform's 128 MB per isolate | the platform's CPU limit |
 
 Outside Cloudflare the build runs behind a host (`#IsolateHost`), a
@@ -106,12 +107,12 @@ status stands for an answer the module never gave. A module that throws, or
 answers `Response.error()`, fails its call the same way; on Cloudflare the
 service binding's call fails alike.
 
-k8s and gcp run no airlock, so a bridge names `docker` and `cloudflare` only, as a
-container bridge does.
+gcp runs no daprd for the airlock, so a bridge names `docker`, `cloudflare`
+and `k8s` only, as a container bridge does.
 
 An isolate reaches the internet as a container bridge does: `--allow-net`
-outside Cloudflare, on the bridge's own egress network, and a Worker's
-outbound access there. The local stack runs it as any bridge: its
+outside Cloudflare, on the bridge's own egress network in compose and its own
+NetworkPolicy on k8s, and a Worker's outbound access there. The local stack runs it as any bridge: its
 `simulator`, or the module itself under `simulator: {}`. There the build lands beside the sources, under
 `.isolate/<hatch>/`, which pronto's `.isolate/.gitignore` keeps out of the
 repository.
@@ -124,22 +125,23 @@ bridges may share an isolate, as they share a container: on docker it is one
 process. On cloudflare a container is one bridge's, and an isolate is too: a
 bridge naming cloudflare shares its isolate with no other.
 
-## Stock isolates
+## Published isolates
 
-A stock isolate is a module pronto ships, which a hatch names by `stock` in
-place of `entrypoint` and `files`. Pronto writes it into the app beside its
-other generated files, under `.pronto/isolates/<stock>/`, its `main.ts`, its
+A published isolate is a module pronto ships, which a hatch names by `uses`,
+as `pronto/<name>`, in place of `entrypoint` and `files`; a `uses` naming no
+isolate pronto ships is refused. Pronto writes it into the app beside its
+other generated files, under `.pronto/isolates/<name>/`, its `main.ts`, its
 `deno.json` and its lock, and the hatch's `entrypoint` and `files` are those;
 from there it is built, served and bounded as any isolate. Its packages are
 pinned by its lock, so an app gets another version of one with another pronto.
 
-**`pdf`** renders a [pdfmake](https://pdfmake.github.io/docs/0.3/) document
+**`pronto/pdf`** renders a [pdfmake](https://pdfmake.github.io/docs/0.3/) document
 definition, the request's JSON body, as pdfmake renders it anywhere, in
 pdfmake's own default font, Roboto, whose four faces its bundle carries: a
 Worker reads no file, so a font is code. The PDF comes back as an effect's
 answer carries bytes, `{"$blob": {base64, type: "application/pdf"}}`, since a
 handler's `sink.fetch` reads its sink's answer as JSON or text
-([the airlock](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/airlock/README.md)); the
+([the airlock](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/airlock/README.md)); the
 handler answers it as it is, and the airlock stores the PDF in the cluster's
 blob plane and settles the URL it serves it at:
 
@@ -170,4 +172,4 @@ bound is the isolate's, whatever the module does: a library whose work grows
 with its input belongs in one.
 
 pdfmake is such a library: it lays out whatever its definition describes, so
-the stock `pdf` isolate is where a program renders one.
+the published `pronto/pdf` isolate is where a program renders one.
