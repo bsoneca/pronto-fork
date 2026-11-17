@@ -172,7 +172,8 @@ const authVars: Record<string, string> = authProviders.length ? {
   ...Object.fromEntries(authProviders.flatMap((p) => {
     const upper = p.toUpperCase()
     const cfg = signIn[p] ?? {}
-    const localIssuer = cfg.issuer === 'http://localhost:28443'
+    // The local broker's issuer: a loopback port, one per app (identity/signin.cue's #LocalPort).
+    const localIssuer = /^http:\/\/localhost:\d+$/.test(cfg.issuer ?? '')
     const entries: [string, string][] = []
     const issuer = Deno.env.get(`OIDC_${upper}_ISSUER`) || (localIssuer ? providerRelease[p]?.releaseIssuer : cfg.issuer)
     if (issuer) entries.push([`OIDC_${upper}_ISSUER`, issuer])
