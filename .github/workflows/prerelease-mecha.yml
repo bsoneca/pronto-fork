@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 1
       - uses: cue-lang/setup-cue@v1.0.1
         with:
-          version: v0.16.1
+          version: v0.18.0-rc.4
       # GHCR_TOKEN, a token with write:packages, when the package doesn't
       # grant this repository's Actions write.
       - name: crane
@@ -68,7 +68,6 @@ jobs:
           p = 'published.cue'
           s = open(p).read()
           for old, new in [
-              ('import "strings"\n\n', ''),
               ('#Pin: =~"^bonitao/mecha-', '#Pin: =~"^(bonitao|ghcr\\\\.io/bsoneca)/mecha-'),
               ('#Pin & strings.HasPrefix("bonitao/mecha-\\(s):")', '#Pin & =~"^(bonitao|ghcr\\\\.io/bsoneca)/mecha-\\(s):"'),
           ]:
@@ -91,7 +90,7 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
       - name: auth image
         env:
-          AUTH_BASE: bonitao/mecha-auth:0.22.0@sha256:72326ef949c488a6cb1dfc3c3c35f55f400fed4f0e5ca8e1fe5ca88d7de4f667
+          AUTH_BASE: bonitao/mecha-auth:0.25.0@sha256:2ba512be305310334d10dbc08c9e2830a30c5e3095fcc0abdabedf8ce73ef7c7
           AUTH: ghcr.io/bsoneca/mecha-auth
         run: |
           if ! crane digest "$AUTH:$MECHA_V" >/dev/null 2>&1; then
@@ -106,11 +105,11 @@ jobs:
           fi
           echo "auth: $AUTH:$MECHA_V@$(crane digest "$AUTH:$MECHA_V")" | tee -a "$GITHUB_STEP_SUMMARY"
       # The airlock image: upstream's airlock at the release mecha-fork's line
-      # syncs onto (0.22.0), with the fork's airlock sources over it, so a door
+      # syncs onto (0.25.0), with the fork's airlock sources over it, so a door
       # (mecha-fork#26) runs where a pronto prerelease or an operator pins it.
       - name: airlock image
         env:
-          AIRLOCK_BASE: bonitao/mecha-airlock:0.22.0@sha256:8b711e8ac228f49e6f0e8871cc45b7e8bd3cacbf99ab30ca224a3fa4416e3ecf
+          AIRLOCK_BASE: bonitao/mecha-airlock:0.25.0@sha256:82dd88d15578025b4c5534309f2b3336a96ba1c0a58de7bb8f27dc90c0d3d310
           AIRLOCK: ghcr.io/bsoneca/mecha-airlock
         run: |
           if ! crane digest "$AIRLOCK:$MECHA_V" >/dev/null 2>&1; then
@@ -140,7 +139,7 @@ jobs:
       - name: base
         run: |
           base=$(git -C mecha describe --tags --abbrev=0 2>/dev/null || true)
-          for v in v0.17.1 v0.22.0 $base; do
+          for v in v0.17.1 v0.22.0 v0.25.0 $base; do
             crane digest "$REG:$v" >/dev/null 2>&1 || crane copy "registry.cue.works/github.com/bonisoft3/mecha:$v" "$REG:$v"
           done
       - name: runtime
