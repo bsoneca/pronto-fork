@@ -97,7 +97,7 @@ import (
 		// The cluster's own namespaces admit every pod of theirs to what they
 		// run, a bridge among them, and hold its Services, `default` the API
 		// server's, which a bridge's Service of the same name would take.
-		if list.Contains(["default", "kube-system", "kube-public", "kube-node-lease", "cnpg-system", "dapr-system", "observability", "external-secrets", "envoy-gateway-system"], app.idspace) {"the airlock's bridges would share namespace \(app.idspace) with the cluster's own, which admits its pods: release the app into its own"},
+		if list.Contains(["default", "kube-system", "kube-public", "kube-node-lease", "cnpg-system", "dapr-system", "observability", "external-secrets", "envoy-gateway-system"], app.ns) {"the airlock's bridges would share namespace \(app.ns) with the cluster's own, which admits its pods: release the app into its own"},
 		// Its Jobs' names, the longest the ledger's upgrade's, within the 63
 		// characters Kubernetes allows one.
 		if len("\(app.id)-airlock-upgrade") > 63 {"the app's name \(app.id) leaves its Job \(app.id)-airlock-upgrade past the 63 characters a Job's name takes: shorten it"},
@@ -107,13 +107,13 @@ import (
 		{
 			apiVersion: "v1"
 			kind:       "ConfigMap"
-			metadata:   {name: "\(app.id)-airlock-endpoints", namespace: app.idspace, labels: (component & {c: "airlock-mesh"}).out}
+			metadata:   {name: "\(app.id)-airlock-endpoints", namespace: app.ns, labels: (component & {c: "airlock-mesh"}).out}
 			data:       endpointFiles
 		},
 		{
 			apiVersion: "apps/v1"
 			kind:       "Deployment"
-			metadata:   {name: "\(app.id)-airlock-mesh", namespace: app.idspace, labels: (component & {c: "airlock-mesh"}).out}
+			metadata:   {name: "\(app.id)-airlock-mesh", namespace: app.ns, labels: (component & {c: "airlock-mesh"}).out}
 			spec: {
 				replicas: 1
 				selector: matchLabels: (component & {c: "airlock-mesh"}).out
@@ -147,7 +147,7 @@ import (
 		{
 			apiVersion: "v1"
 			kind:       "Service"
-			metadata:   {name: "airlock-mesh", namespace: app.idspace, labels: (component & {c: "airlock-mesh"}).out}
+			metadata:   {name: "airlock-mesh", namespace: app.ns, labels: (component & {c: "airlock-mesh"}).out}
 			spec: {
 				selector: (component & {c: "airlock-mesh"}).out
 				ports:    [{name: "http", port: meshPort, targetPort: meshPort, protocol: "TCP"}]
@@ -156,7 +156,7 @@ import (
 		{
 			apiVersion: "apps/v1"
 			kind:       "Deployment"
-			metadata:   {name: "\(app.id)-airlock", namespace: app.idspace, labels: (component & {c: "airlock"}).out}
+			metadata:   {name: "\(app.id)-airlock", namespace: app.ns, labels: (component & {c: "airlock"}).out}
 			spec: {
 				// Processes share the queue safely (the README's "After a
 				// crash"), so a rolling replacement may overlap.
@@ -208,7 +208,7 @@ import (
 		{
 			apiVersion: "v1"
 			kind:       "Service"
-			metadata:   {name: "airlock", namespace: app.idspace, labels: (component & {c: "airlock"}).out}
+			metadata:   {name: "airlock", namespace: app.ns, labels: (component & {c: "airlock"}).out}
 			spec: {
 				selector: (component & {c: "airlock"}).out
 				ports:    [{name: "tcp", port: airlockPort, targetPort: airlockPort, protocol: "TCP"}]
@@ -219,7 +219,7 @@ import (
 		{
 			apiVersion: "networking.k8s.io/v1"
 			kind:       "NetworkPolicy"
-			metadata:   {name: "\(app.id)-airlock", namespace: app.idspace, labels: (component & {c: "airlock"}).out}
+			metadata:   {name: "\(app.id)-airlock", namespace: app.ns, labels: (component & {c: "airlock"}).out}
 			spec: {
 				podSelector: matchLabels: (component & {c: "airlock"}).out
 				policyTypes: ["Ingress", "Egress"]
@@ -239,7 +239,7 @@ import (
 		{
 			apiVersion: "networking.k8s.io/v1"
 			kind:       "NetworkPolicy"
-			metadata:   {name: "\(app.id)-airlock-mesh", namespace: app.idspace, labels: (component & {c: "airlock-mesh"}).out}
+			metadata:   {name: "\(app.id)-airlock-mesh", namespace: app.ns, labels: (component & {c: "airlock-mesh"}).out}
 			spec: {
 				podSelector: matchLabels: (component & {c: "airlock-mesh"}).out
 				policyTypes: ["Ingress", "Egress"]
@@ -259,7 +259,7 @@ import (
 		{
 			apiVersion: "apps/v1"
 			kind:       "Deployment"
-			metadata:   {name: "\(app.id)-bridge-\(c)", namespace: app.idspace, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
+			metadata:   {name: "\(app.id)-bridge-\(c)", namespace: app.ns, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
 			spec: {
 				// Always up: nothing in front of a bridge holds a call while one
 				// starts, so a cold bridge would fail the run that woke it.
@@ -295,7 +295,7 @@ import (
 		{
 			apiVersion: "v1"
 			kind:       "Service"
-			metadata:   {name: c, namespace: app.idspace, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
+			metadata:   {name: c, namespace: app.ns, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
 			spec: {
 				selector: (component & {"c": c}).out
 				ports:    [{name: "http", port: b.port, targetPort: b.port, protocol: "TCP"}]
@@ -307,7 +307,7 @@ import (
 		{
 			apiVersion: "networking.k8s.io/v1"
 			kind:       "NetworkPolicy"
-			metadata:   {name: "\(app.id)-bridge-\(c)", namespace: app.idspace, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
+			metadata:   {name: "\(app.id)-bridge-\(c)", namespace: app.ns, labels: (component & {"c": c}).out & {(#bridgeLabel): "true"}}
 			spec: {
 				podSelector: matchLabels: (component & {"c": c}).out
 				policyTypes: ["Ingress", "Egress"]
