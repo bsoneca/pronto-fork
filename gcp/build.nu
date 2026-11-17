@@ -400,7 +400,7 @@ export def service-jwt [secret: string]: nothing -> string {
 	$secret | ^python3 -I -c 'import sys,hmac,hashlib,base64,json
 b=lambda d: base64.urlsafe_b64encode(d).rstrip(b"=").decode()
 h=b(json.dumps({"alg":"HS256","typ":"JWT"},separators=(",",":")).encode())
-p=b(json.dumps({"role":"service","sub":"00000000-0000-0000-0000-000000000000"},separators=(",",":")).encode())
+p=b(json.dumps({"iss":"mecha:stack","role":"service","sub":"00000000-0000-0000-0000-000000000000"},separators=(",",":")).encode())
 k=sys.stdin.buffer.read()
 print(h+"."+p+"."+b(hmac.new(k,(h+"."+p).encode(),hashlib.sha256).digest()),end="")'
 }

@@ -13,3 +13,6 @@ bundle/edge-ssr-rpc_test.ts
 bundle/mecha-edge-compression_test.ts
 bundle/mecha-edge-compute_test.ts
 bundle/mecha-edge-retention_test.ts
+# .say.yaml's isolates rule (builds a stock isolate and serves it on loopback) and the edge's workerd (pglite-workerd's wrangler-dev from mecha's tree):
+isolate-pdf.test.ts
+bundle/edge-isolate-workerd_test.ts

@@ -76,3 +76,9 @@ types.test.ts
 types_test.ts
 vendored-unit.test.ts
 workflow-omnishell-control.test.ts
+drive-access.test.ts
+isolate-hatches.test.ts
+reads.test.ts
+rewrites.test.ts
+secret-seal.test.ts
+token-roles.test.ts

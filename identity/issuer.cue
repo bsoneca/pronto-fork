@@ -6,7 +6,7 @@
 //
 //	import "github.com/bonisoft3/pronto/identity"
 //
-//	issuers: [Name=string]: identity.#Issuer & {name: Name}
+//	issuers: [string]~(Name,_): identity.#Issuer & {name: Name}
 //
 // The issuer, its clients and its claims are the application's. The claims the
 // token becomes are mecha's upgrade's (services/auth/README.md#upgrade):
@@ -46,7 +46,8 @@ _claimMax: 200
 	values?: [string]: #Claim
 }
 
-#Issuer: I={
+#Issuer: {
+	let I = self
 	// Its name, which an upgraded session's `idp` carries.
 	name!: #Claim & =~"^[a-z][a-z0-9-]*$"
 	// A token the application's front checks and exchanges. A sign-in by

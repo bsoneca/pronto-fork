@@ -103,6 +103,7 @@ def run-tests [] {
 	test_crane_pinned
 	test_auth_providers
 	test_auth_provider_secrets
+	test_trusted_keys
 	test_release_tree
 	test_read_environment
 	test_render_manifests_kind
@@ -341,6 +342,12 @@ def test_auth_provider_secrets [] {
 	let public_client = (auth-provider-environment ($environment | update OIDC_GOOGLE_CLIENT_SECRET ""))
 	assert equal $public_client.oidcSecrets []
 	assert equal $public_client.oidcSecretDigest ""
+	let with_release_broker = (auth-provider-environment {
+		OIDC_PROVIDERS: "google", OIDC_GOOGLE_CLIENT_ID: "origin"
+		OIDC_GOOGLE_ISSUER: "http://localhost:28443", OIDC_GOOGLE_INTERNAL: "http://identity:28443/"
+	} {google: {releaseIssuer: "https://id.example.com"}})
+	assert equal $with_release_broker.oidc.OIDC_GOOGLE_ISSUER "https://id.example.com"
+	assert equal $with_release_broker.oidc.OIDC_GOOGLE_INTERNAL "https://id.example.com"
 	{App: {auth: {oidc: {OIDC_GOOGLE_CLIENT_SECRET: "must-be-refused"}}}} | to json | save -f $data
 	let refused = (try { render-manifests $app.cue_path "kind" --data $data; false } catch {|err|
 		assert ($err.msg | str contains "field not allowed")
@@ -465,6 +472,32 @@ HEALTHCHECK --interval=1s CMD [\"pg_isready\"]
 	assert equal $before.initdb $"localhost:5001/sample-database:16@(do $digest '1')"
 	assert equal $after.initdb $"localhost:5001/sample-database:16@(do $digest '3')" "and the Jobs replay it from the full image"
 	assert equal (do $render "1" "").cluster $"localhost:5001/sample-database:16@(do $digest '1')" "without a base the primary runs the full image, as before"
+}
+
+def test_trusted_keys [] {
+	print "test a trusted issuer's keys stay outside the manifests, and crud verifies them for its audience..."
+	let app = (resolve-app ($fixtures_dir | path join "sample"))
+	let plain = (render-manifests $app.cue_path "kind" | from yaml | where kind == "Deployment" and metadata.name == "sample-crud" | first | get spec.template)
+	assert equal ($plain.spec.containers.0.env | where name == "PGRST_JWT_SECRET" | first | get valueFrom.secretKeyRef) {name: "sample-auth-secrets", key: "PGRST_JWT_SECRET"}
+	assert ($plain.spec.containers.0.env | where name == "PGRST_JWT_AUD" | is-empty)
+	let digest = ("{\"keys\":[]}" | hash sha256)
+	let data = (mktemp --suffix .json)
+	{App: {trustedKeysDigest: $digest, trustedAudience: ""}} | to json | save -f $data
+	let yaml = (render-manifests $app.cue_path "kind" --data $data)
+	rm $data
+	let pod = ($yaml | from yaml | where kind == "Deployment" and metadata.name == "sample-crud" | first | get spec.template)
+	let crud = $pod.spec.containers.0.env
+	assert equal ($crud | where name == "PGRST_JWT_SECRET" | length) 1
+	assert equal ($crud | where name == "PGRST_JWT_SECRET" | first | get valueFrom.secretKeyRef) {name: "sample-trusted-keys", key: "PGRST_JWKS"}
+	assert (($crud | where name == "PGRST_JWT_AUD" | first | get value) ends-with "/crud")
+	assert equal ($pod.metadata.annotations | get "pronto.dev/trusted-keys-digest") $digest
+	# The key set is a Secret the release applies through stdin, never a manifest.
+	assert not ($yaml | str contains "PGRST_JWKS:")
+	let named = (mktemp --suffix .json)
+	{App: {trustedKeysDigest: $digest, trustedAudience: "https://api.example/crud"}} | to json | save -f $named
+	let aud = (render-manifests $app.cue_path "kind" --data $named | from yaml | where kind == "Deployment" and metadata.name == "sample-crud" | first | get spec.template.spec.containers.0.env | where name == "PGRST_JWT_AUD" | first | get value)
+	rm $named
+	assert equal $aud "https://api.example/crud"
 }
 
 def test_schema_jobs [] {
