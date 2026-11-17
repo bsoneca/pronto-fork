@@ -90,7 +90,7 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
       - name: auth image
         env:
-          AUTH_BASE: bonitao/mecha-auth:0.25.0@sha256:2ba512be305310334d10dbc08c9e2830a30c5e3095fcc0abdabedf8ce73ef7c7
+          AUTH_BASE: bonitao/mecha-auth:0.25.1@sha256:19d70ae54781d5bab0414b9231e7e8d841e58cff4c4f96cda8bcd6c24fa945e8
           AUTH: ghcr.io/bsoneca/mecha-auth
         run: |
           if ! crane digest "$AUTH:$MECHA_V" >/dev/null 2>&1; then
@@ -105,11 +105,11 @@ jobs:
           fi
           echo "auth: $AUTH:$MECHA_V@$(crane digest "$AUTH:$MECHA_V")" | tee -a "$GITHUB_STEP_SUMMARY"
       # The airlock image: upstream's airlock at the release mecha-fork's line
-      # syncs onto (0.25.0), with the fork's airlock sources over it, so a door
+      # syncs onto (0.25.1), with the fork's airlock sources over it, so a door
       # (mecha-fork#26) runs where a pronto prerelease or an operator pins it.
       - name: airlock image
         env:
-          AIRLOCK_BASE: bonitao/mecha-airlock:0.25.0@sha256:82dd88d15578025b4c5534309f2b3336a96ba1c0a58de7bb8f27dc90c0d3d310
+          AIRLOCK_BASE: bonitao/mecha-airlock:0.25.1@sha256:c84af38310b9210a13eac8576bf5336104d078f60912cda47a98536af5c2afba
           AIRLOCK: ghcr.io/bsoneca/mecha-airlock
         run: |
           if ! crane digest "$AIRLOCK:$MECHA_V" >/dev/null 2>&1; then
@@ -139,7 +139,7 @@ jobs:
       - name: base
         run: |
           base=$(git -C mecha describe --tags --abbrev=0 2>/dev/null || true)
-          for v in v0.17.1 v0.22.0 v0.25.0 $base; do
+          for v in v0.17.1 v0.22.0 v0.25.0 v0.25.1 $base; do
             crane digest "$REG:$v" >/dev/null 2>&1 || crane copy "registry.cue.works/github.com/bonisoft3/mecha:$v" "$REG:$v"
           done
       - name: runtime
