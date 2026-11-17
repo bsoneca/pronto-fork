@@ -10,7 +10,7 @@ The adapter replaces Compose database credentials and internal service tokens wi
 
 ## The airlock
 
-An app that declares an effect gets mecha's airlock, its daprd and the bridges named for k8s, as pronto's release deploys them: the design, its walls, its probes and its Secrets are [[../../docs/release-targets#Effects on k8s]]'s, drawn in [`schema/airlock.cue`](schema/airlock.cue). What this fork adds on top of it:
+An app that declares an effect gets mecha's airlock, its daprd and the bridges named for k8s, as pronto's release deploys them: the design, its walls, its probes and its Secrets are [[../../docs/release-targets#Effects on k8s]]'s, drawn in [`schema/airlock.cue`](../schema/airlock.cue). What this fork adds on top of it:
 
 - **A built database gets what an effect needs.** A database built before the app's first effect gets Graphile Worker's schema and the airlock's ledger from `<app>-initdb`, where upstream's release refuses it. Over an already-built database it runs the image's `*_graphile_worker.sql` once, in one transaction, when Graphile's schema is not there: the step is no replay (it inserts its first migration and creates its tables bare), and Graphile migrates its own schema at every worker start. `*_airlock.sql` is re-runnable, and is replayed with the other steps on every release, in one transaction, so a mecha upgrade's ledger reaches a built database; the ledger's job key follows it at once.
 - **A tenant's release and a preview of an app with effects are refused** (`airlock-refusals`): a tenant's release drops every NetworkPolicy (`tenant-manifests`) and the walls with them, and a preview's airlock would perform real effects with the release's sinks' credentials.
