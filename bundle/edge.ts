@@ -21,7 +21,7 @@
 //                applies them, the cluster's pgroll set last: what a publish
 //                hands a data directory the object kept (publish-edge.ts)
 // <out>/src/index.ts, <out>/wrangler.jsonc, whose vars name the providers a
-//                person signs in through (edge-signin.ts)
+//                person signs in through
 import { readEdgeHatches, applyHatchAttributes } from './edge-hatches.ts'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'

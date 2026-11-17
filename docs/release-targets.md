@@ -543,11 +543,13 @@ What fixes its shape, as built:
   `/auth/guest` mints a guest's credentials, the passkey ceremonies run with
   the Worker's door as the relying party, and the object runs the auth
   service's provider sign-in (`/auth/oidc/*`) for the providers the program
-  names (`auth.providers`): [`edge-signin.ts`](../bundle/edge-signin.ts)
-  writes the settings compose would give the auth service into the Worker's
-  vars, the program's or the build environment's `OIDC_<NAME>_<SETTING>`, and
-  `publish-edge.ts` puts each client secret, `OIDC_<NAME>_CLIENT_SECRET` from
-  its environment, beside `JWT_SECRET`; register the callback
+  names (`auth.providers`): `edge.ts` writes the settings
+  compose would give the auth service into the Worker's vars, the program's or
+  the build environment's `OIDC_<NAME>_<SETTING>` (a local broker's issuer
+  becomes the release's, `releaseBroker`), and `publish-edge.ts` puts each
+  client secret, `OIDC_<NAME>_CLIENT_SECRET` from its environment, beside
+  `JWT_SECRET`, refusing a provider with no client id, a local issuer and
+  Google's own with no secret ([`edge-signin.ts`](../bundle/edge-signin.ts)); register the callback
   `<origin>/auth/oidc/<name>/callback` with the provider (or the broker).
 - **Sync holds requests open.** A tab's live shape request waits on the
   object, which keeps the object awake while a tab is open; that is the price

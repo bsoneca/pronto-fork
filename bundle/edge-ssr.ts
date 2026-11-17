@@ -360,7 +360,7 @@ ${images ? '    const image = await edgeImage(request, env, caches.default, ctx,
     ...(separate && triggers ? { triggers } : {}),
     // An effect's bytes are written by the object, wherever it runs.
     ...(separate && config.r2_buckets ? { r2_buckets: config.r2_buckets } : {}),
-    // The object reads the providers it signs in through (edge-signin.ts).
+    // The object reads the providers it signs in through (edge.ts).
     ...(separate && config.vars ? { vars: config.vars } : {}),
     version_metadata: { binding: 'CF_VERSION_METADATA' },
     durable_objects: { bindings: [{ name: 'CLUSTER', class_name: 'Cluster' }, ...(compute ? [{ name: 'COMPUTE_COORDINATOR', class_name: 'ComputeCoordinator' }, compute.reader] : [])] },
