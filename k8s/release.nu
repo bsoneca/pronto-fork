@@ -1669,9 +1669,10 @@ export def auth-provider-environment [environment: record, release_providers: re
 	}
 }
 
-# The schemas PostgREST serves, as compose gives crud (PGRST_DB_SCHEMA): public, then an app's API schemas.
-export def crud-schemas [environment: record]: nothing -> string {
-	$environment.PGRST_DB_SCHEMA? | default "public"
+# The schemas PostgREST serves, as compose gives crud (PGRST_DB_SCHEMA): the app's own schema, then its API
+# schemas. Null where compose names none: the release's CUE then serves the app's schema alone.
+export def crud-schemas [environment: record]: nothing -> any {
+	$environment.PGRST_DB_SCHEMA?
 }
 
 export def auth-provider-secret [name: string, namespace: string, values: record]: nothing -> record {
@@ -2036,7 +2037,7 @@ export def main [
 		{jwks: $jwks, digest: ($jwks | hash sha256), audience: ($env.TRUSTED_AUDIENCE? | default "")}
 	}
 	let pushed_file = (mktemp -t pushed.XXXXXX.json | str trim)
-	{App: ({image: {pushed: $pushed}, auth: ($oidc | reject secretValues), crud: {schemas: $crud_schemas}} | merge $migrate | merge (if ($services | is-empty) { {} } else { {services: $own_env} }) | merge (if ($preview | is-empty) { {} } else { {preview: $preview} }) | merge (if $is_tenant { {tenant: $tenant, tenantHost: $host} } else { {} }) | merge (if $trusted == null { {} } else { {trustedKeysDigest: $trusted.digest, trustedAudience: $trusted.audience} }))} | to json | save -f $pushed_file
+	{App: ({image: {pushed: $pushed}, auth: ($oidc | reject secretValues)} | merge (if $crud_schemas == null { {} } else { {crud: {schemas: $crud_schemas}} }) | merge $migrate | merge (if ($services | is-empty) { {} } else { {services: $own_env} }) | merge (if ($preview | is-empty) { {} } else { {preview: $preview} }) | merge (if $is_tenant { {tenant: $tenant, tenantHost: $host} } else { {} }) | merge (if $trusted == null { {} } else { {trustedKeysDigest: $trusted.digest, trustedAudience: $trusted.audience} }))} | to json | save -f $pushed_file
 	let released = (render-manifests $app_info.cue_path $cluster_env --data $pushed_file | if $is_tenant { tenant-manifests $tenant } else { $in })
 	rm $pushed_file
 
