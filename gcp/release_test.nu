@@ -372,6 +372,12 @@ def test_preflight_seal_key_of_a_sidecar_airlock [] {
 	rm -r $c
 	assert ($envonly.exit_code != 0)
 	assert ($envonly.stderr | str contains "does not seal secret fields")
+	# The key in the sidecar's env alone is refused even where compose declares none.
+	let e = (preflight-app '{"X": "1"}' --name airlock --extra ", env: {AIRLOCK_SEAL_KEY: \"x\"}")
+	let envnone = (preflight-run $d $e)
+	rm -r $e
+	assert ($envnone.exit_code != 0)
+	assert ($envnone.stderr | str contains "does not seal secret fields")
 	rm -r $d
 }
 

@@ -45,7 +45,7 @@ Deno.test("the built-in roles are restated from 001_roles.sql before the grant a
   for (const [name, text, grant] of [["k8s", script, "for step in 005_create_tables.sql"], ["gcp", gcp, "GRANT \\(strings.Join("]] as const) {
     const restated = text.indexOf("psql -v ON_ERROR_STOP=1 -Xq -f /docker-entrypoint-initdb.d/001_roles.sql");
     assert(restated > 0, `${name}: 001_roles.sql is run again`);
-    assertStringIncludes(text, "if [ -f /docker-entrypoint-initdb.d/001_roles.sql ]");
+    assert(!text.includes("if [ -f /docker-entrypoint-initdb.d/001_roles.sql ]"), `${name}: a missing 001_roles.sql fails loudly`);
     assert(restated < text.indexOf("\\(declaredRolesStep)"), `${name}: before the declared roles`);
     assert(text.indexOf("\\(declaredRolesStep)") < text.indexOf(grant, text.indexOf("\\(declaredRolesStep)")), `${name}: before ${grant}`);
   }

@@ -757,10 +757,10 @@ import (
 	// The built-in roles (anon, app_user, service, electric, authenticator) are no declared roles, and
 	// a database built without auth, schedules, timed machines or effects lacks some of them: its first
 	// effect's GRANT, or a membership, would then fail. The image's 001_roles.sql, as initdb ran it on a
-	// fresh volume, is run again before the replays: every statement of it is guarded (a role made only
-	// where missing, an attribute set only where short, a grant only where absent), so on a database that
-	// has the roles it changes nothing.
-	let builtinRolesStep = "  # The built-in roles initdb makes, restated (001_roles.sql is idempotent): a database built without\n  # auth, schedules or effects lacks the ones its first effect's grant names.\n  if [ -f /docker-entrypoint-initdb.d/001_roles.sql ]; then echo \"initdb: restating 001_roles.sql\"\n    psql -v ON_ERROR_STOP=1 -Xq -f /docker-entrypoint-initdb.d/001_roles.sql\n  fi"
+	// fresh volume, is run again before the replays. It is written to be re-run: a role is made only where
+	// missing, an attribute set only where short, and each of electric's grants only where absent. A
+	// missing file fails the job.
+	let builtinRolesStep = "  # The built-in roles initdb makes, restated (001_roles.sql is written to be re-run): a database built without\n  # auth, schedules or effects lacks the ones its first effect's grant names.\n  echo \"initdb: restating 001_roles.sql\"\n  psql -v ON_ERROR_STOP=1 -Xq -f /docker-entrypoint-initdb.d/001_roles.sql"
 	let declaredRolesStep = strings.Join([builtinRolesStep, if len(declaredRoles) > 0 {
 		"  # A token role the program declared after this database was built is made now, before the\n  # grant below and the replays, which may grant it something.\n  psql -v ON_ERROR_STOP=1 -Xq <<'SQL'\n\(declaredRolesSql)\nSQL"
 	}], "\n")

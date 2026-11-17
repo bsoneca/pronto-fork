@@ -622,7 +622,8 @@ def render-staged [app_info: record, compose: record, plan0: record, base: recor
 		# has secret fields), the sidecar maps it through GCP.sidecars.<name>.secrets, which alone counts: a
 		# key in its env renders as a reference to <id>-airlock-seal-key, which this path never creates.
 		let wants_seal = ("AIRLOCK_SEAL_KEY" in ($compose.services | get $n | get -o environment | default {} | columns))
-		if $n == "airlock" and $wants_seal and not ("AIRLOCK_SEAL_KEY" in ($mapped | get -o $n | default [])) {
+		let env_only = ("AIRLOCK_SEAL_KEY" in $set) and not ("AIRLOCK_SEAL_KEY" in ($mapped | get -o $n | default []))
+		if $n == "airlock" and ($env_only or ($wants_seal and not ("AIRLOCK_SEAL_KEY" in ($mapped | get -o $n | default [])))) {
 			error make {msg: "release@gcp does not seal secret fields for an airlock run as a GCP.sidecars entry: its seal key would be compose's development key. Run the airlock as the service's own, or map AIRLOCK_SEAL_KEY through the sidecar's secrets (GCP.sidecars.airlock.secrets)"}
 		}
 		# Compose's development seal and an empty previous key are not the sidecar's to carry.
