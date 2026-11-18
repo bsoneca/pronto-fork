@@ -1281,34 +1281,72 @@ export def copy-schema [source_ns: string, target: record, --pgroll] {
 	}
 }
 
-# Each variable the airlock service requires (`${K:?...}`, how mecha writes an effect's secret that is not
-# simulated) that no other service reads: a release that deploys no airlock (metal, a tenant) reads compose
-# with a stand-in for it, so compose parses and the operator need not export what nothing here uses. A
-# service that reads the name too gets the environment's value, so a missing one still fails, naming the
-# variable. `raw` is the project as `docker compose config --no-interpolate --format json` gives it.
-export def airlock-stand-ins [raw: record]: nothing -> record {
-	let services = ($raw.services? | default {})
-	if "airlock" not-in $services { return {} }
-	let required = ($services.airlock | to json --raw | str replace -a '$$' '' | parse -r '\$\{(?<k>[A-Za-z_][A-Za-z0-9_]*):\?' | get k | uniq)
-	let others = ($services | transpose name svc | where name != "airlock")
-	$required | where {|k|
-		let read = ('\$\{?' + $k + '\b')
-		not ($others | any {|o| ($o.svc.env_file? | default [] | is-not-empty) or (($o.svc | to json --raw | str replace -a '$$' '') =~ $read) })
-	} | reduce -f {} {|k, acc| $acc | insert $k "secretKeyRef" }
+# A service's environment (or any map under another name) as entries, from the map compose writes or
+# the list (`K`, `K=v`): a name passed through shows as a key with no value.
+def env-entries [svc: record]: nothing -> list<record> {
+	let e = ($svc.environment? | default {})
+	if ($e | describe) starts-with "list" {
+		$e | each {|x| let p = ($x | into string | split row -n 2 "="); {key: $p.0, value: ($p | get -o 1)} }
+	} else { $e | transpose key value }
+}
+
+# The services the airlock's wall holds that this release does not run: the airlock, its daprd's mesh,
+# its upgrade job and each bridge's container (the host of airlock-mesh's BRIDGE_<NAME>_URL) and the AI gateway.
+def airlock-owned [raw: record]: nothing -> list<string> {
+	let services = ($raw.services? | default {} | columns)
+	let mesh = ($raw.services?."airlock-mesh"? | default {})
+	let bridges = (env-entries $mesh | where {|e| $e.key =~ '^BRIDGE_.*_URL$' and $e.value != null }
+		| each {|e| $e.value | into string | parse -r '^https?://(?<host>[^:/]+)' | get -o 0.host } | compact)
+	["airlock" "airlock-mesh" "airlock-upgrade"] | append $bridges | append (if "tsbifrost" in $services { ["tsbifrost"] } else { [] }) | where {|s| $s in $services } | uniq
+}
+
+# The stand-ins a release that deploys no airlock (metal, a tenant) reads compose with, worked out once.
+# mecha writes an effect's secret that is not simulated as `${K:?...}`, which compose refuses unset, and the
+# release needs none of them (its pods read them from Secrets). So: none where compose reads plainly (the
+# common case), else each variable compose names as missing takes a stand-in of its own, one read at a time,
+# until the project parses (so `include` and every other construct is read as compose reads it). A stand-in
+# that shows in a service outside the airlock side (the airlock, its mesh, its upgrade job, each bridge's
+# container and the AI gateway: an environment or build arg, a pass-through, a label, a command, what an env_file
+# interpolates), or in the rest of the project (its configs and secrets) is no airlock-only secret: that reader takes the value from the
+# environment, so the release fails naming the variable, as compose does. The operator's values are never
+# replaced: a variable the environment sets is not missing.
+export def release-stand-ins [app_dir: string, no_airlock: bool]: nothing -> record {
+	if not $no_airlock { return {} }
+	let read = {|env_vars| do { cd $app_dir; with-env $env_vars { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; ^docker compose --profile "*" config --format json } } | complete }
+	let plain = (do $read {})
+	if $plain.exit_code == 0 { return {} }
+	mut stand = {}
+	mut last = $plain
+	for _ in 1..200 {
+		let missing = ($last.stderr | parse -r 'required variable (?<k>[A-Za-z_][A-Za-z0-9_]*) is missing a value' | get -o 0.k)
+		if $missing == null or $missing in ($stand | columns) { error make { msg: ($plain.stderr | str trim) } }
+		$stand = ($stand | insert $missing $"__($missing)__standin__")
+		$last = (do $read $stand)
+		if $last.exit_code == 0 { break }
+	}
+	if $last.exit_code != 0 { error make { msg: ($plain.stderr | str trim) } }
+	let stand = $stand
+	let project = ($last.stdout | from json)
+	let owned = (airlock-owned $project)
+	let others = ($project.services | transpose name svc | where {|o| $o.name not-in $owned })
+	let rest = ($project | reject services | to json --raw)
+	let shared = ($stand | transpose k v | where {|e|
+		($rest | str contains $e.v) or ($others | any {|o| (($o.svc | to json --raw) | str contains $e.v) })
+	} | get k)
+	if ($shared | is-not-empty) {
+		let readers = ($shared | each {|k| let v = ($stand | get $k); $"($k) is an effect's secret and also read by ((($others | where {|o| (($o.svc | to json --raw) | str contains $v) } | get name) | append (if ($rest | str contains $v) { ["the project's configs or secrets"] } else { [] })) | str join ', '): export it" } | str join "; ")
+		error make { msg: $"($readers) \(($plain.stderr | str trim)\)" }
+	}
+	$stand
 }
 
 # The app's compose project: as text, as JSON (--json) or its services' names (--services). Read with
 # no seal key in the environment, so the airlock's shows the local stack's default, the development
-# key the release refuses (seal-keys). `--no-airlock`: the release deploys none (metal, a tenant), so
-# the airlock's own required variables take stand-ins where the environment sets none (airlock-stand-ins).
-export def compose-config [app_dir: string, --json, --services, --no-airlock]: nothing -> any {
+# key the release refuses (seal-keys). `--stand-ins` (release-stand-ins) are the variables a release
+# that deploys no airlock reads it with, where it could not be read plainly.
+export def compose-config [app_dir: string, --json, --services, --stand-ins: record = {}]: nothing -> any {
 	let args = if $services { ["--services"] } else if $json { ["--format" "json"] } else { [] }
-	let stand = if $no_airlock {
-		let raw = (do { cd $app_dir; ^docker compose --profile "*" config --no-interpolate --format json } | complete)
-		if $raw.exit_code != 0 { error make { msg: ($raw.stderr | str trim) } }
-		airlock-stand-ins ($raw.stdout | from json) | items {|k, v| if ($env | get -o $k | default "" | is-empty) { {($k): $v} } else { {} } } | into record
-	} else { {} }
-	let r = (with-env $stand { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd $app_dir; ^docker compose --profile "*" config ...$args } | complete)
+	let r = (with-env $stand_ins { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd $app_dir; ^docker compose --profile "*" config ...$args } | complete)
 	if $r.exit_code != 0 { error make { msg: ($r.stderr | str trim) } }
 	if $services { $r.stdout | lines } else if $json { $r.stdout | from json } else { $r.stdout }
 }
@@ -1601,8 +1639,8 @@ export def registry-pg-major [repo: string, digest: string]: nothing -> string {
 # The runtime images built in Cloud Build and pushed to the environment's
 # registry (gcp/build.nu), by service: the database's tagged with its Postgres
 # major, every other with the release's tag.
-export def cloud-build-images [app_dir: string, name: string, services: list<string>, target_env: record, tag: string]: nothing -> record {
-	let override = (compose-config $app_dir | release-override)
+export def cloud-build-images [app_dir: string, name: string, services: list<string>, target_env: record, tag: string, --stand-ins: record = {}]: nothing -> record {
+	let override = (compose-config $app_dir --stand-ins $stand_ins | release-override)
 	let plan = {project: $target_env.build.project, registry: $target_env.registry, preview: $tag}
 	let built = (push-images $app_dir $plan $name $services --platform ($target_env.platform? | default "linux/amd64") --override $override)
 	$built | items {|svc, ref|
@@ -2178,10 +2216,10 @@ def run-wall-probes [app: string, namespace: string, image: record, probes: list
 # workloads, the kinds deleted once their pods are gone, and whether the upgrade job goes. A tenant's
 # release has none to remove (it deploys no airlock: airlock-refusals) and its publisher's ClusterRole
 # holds no right on NetworkPolicies (Studio's spec/tenants.cue), so the delete is Forbidden after the
-# rollout; metal deploys no airlock on this line (release-airlock) and none was ever left there.
+# rollout. A metal release is the operator's, who holds the rights: its deletes find nothing.
 export def stale-airlock-cleanup [app: string, current: list<string>, has_airlock: bool, tenant: string, cluster_env: string]: nothing -> record {
 	let kinds = "service,networkpolicy,secret,configmap"
-	if ($tenant | is-not-empty) or $cluster_env == "metal" { return {selectors: [], kinds: $kinds, job: false} }
+	if ($tenant | is-not-empty) { return {selectors: [], kinds: $kinds, job: false} }
 	let gone = if ($current | is-empty) { "" } else { $",app.kubernetes.io/component notin \(($current | str join ',')\)" }
 	let selectors = [$"app.kubernetes.io/name=($app),pronto.dev/bridge=true($gone)"] | append (if $has_airlock { [] } else { [$"app.kubernetes.io/name=($app),app.kubernetes.io/component in \(airlock,airlock-mesh\)"] })
 	{selectors: $selectors, kinds: $kinds, job: (not $has_airlock)}
@@ -2259,7 +2297,8 @@ export def main [
 	# so a release that omits it serves 502 on every rendered page.
 	# Where no airlock is deployed (metal, a tenant), compose is read with stand-ins for its required variables.
 	let no_airlock = ($cluster_env == "metal" or ($tenant | is-not-empty))
-	let compose_services = (compose-config $app_source_dir --no-airlock=$no_airlock --services)
+	let stand_ins = (release-stand-ins $app_source_dir $no_airlock)
+	let compose_services = (compose-config $app_source_dir --stand-ins $stand_ins --services)
 	let compose_render = ("render" in $compose_services)
 	if $compose_render != $has_render {
 		error make { msg: $"($app_info.cue_path): render.enabled is ($has_render) but the app's compose project (if $compose_render { 'defines' } else { 'lacks' }) a render service" }
@@ -2288,10 +2327,10 @@ export def main [
 		$config.environment
 	} else { read-environment $cluster_env $app_info.cue_path }
 	let registry = $target_env.registry
-	let runtime = (release-runtime $app_source_dir $cluster_env)
 	let refused = (tenant-refusals $tenant $host $preview $target_env $app_source_dir $cluster_env ([$images $buildkit] | str join "") | append (airlock-refusals ($cluster_env != "metal" and "airlock" in $compose_services) $tenant (if $delete { "" } else { $preview })))
 	if ($images | is-not-empty) and ($buildkit | is-not-empty) { error make { msg: "--images or --buildkit, not both" } }
 	if ($refused | is-not-empty) { error make { msg: ($refused | str join "; ") } }
+	let runtime = (release-runtime $app_source_dir $cluster_env)
 	if $cluster_env == "gke" {
 		kubectl get crd clusters.postgresql.cnpg.io externalsecrets.external-secrets.io configurations.dapr.io gateways.gateway.networking.k8s.io backendtrafficpolicies.gateway.envoyproxy.io | ignore
 		kubectl get gatewayclass $target_env.gatewayClassName | ignore
@@ -2352,7 +2391,7 @@ export def main [
 	# migrate runs where the app has ledger migrations or permissions to reconcile, as in compose.
 	let has_migrate = ("migrate" in $compose_services)
 	# What runs beside the cluster (runtime.cue), built from the app's compose services as the cluster's own are.
-	let compose = (compose-config $app_source_dir --no-airlock=$no_airlock --json)
+	let compose = (compose-config $app_source_dir --stand-ins $stand_ins --json)
 	let airlock = (release-airlock $app_source_dir $cluster_env (open ($app_source_dir | path join .pronto cluster.json)))
 	let has_airlock = ($airlock | is-not-empty)
 	let airlock_svcs = if $has_airlock { ["airlock" "airlock-mesh" "airlock-upgrade"] | append ($airlock.bridges | values | get build | uniq) } else { [] }
@@ -2368,7 +2407,7 @@ export def main [
 	let pushed = if $is_tenant {
 		let given = if ($buildkit | is-not-empty) {
 			# Pushed with the builder's own rights: the publisher's KUBECONFIG is set aside for it.
-			let compose = (compose-config $app_source_dir --no-airlock=$no_airlock)
+			let compose = (compose-config $app_source_dir --stand-ins $stand_ins)
 			let push_env = if ($push_kubeconfig | is-not-empty) { {KUBECONFIG: $push_kubeconfig} } else { {} }
 			# A closure's environment is its own: the publisher's KUBECONFIG is back once it returns.
 			do {
@@ -2380,16 +2419,16 @@ export def main [
 		if ($missing | is-not-empty) { error make { msg: $"--images has no image for ($missing | str join ', ')" } }
 		$given | select ...$build_svcs
 	} else if $target_env.build.by == "cloudbuild" {
-		cloud-build-images $app_source_dir $app_info.name $build_svcs $target_env $app_meta.image.tag
+		cloud-build-images $app_source_dir $app_info.name $build_svcs $target_env $app_meta.image.tag --stand-ins $stand_ins
 	} else if $target_env.build.by == "buildkit" {
 		ensure-node-buildkit
-		let compose = (compose-config $app_source_dir --no-airlock=$no_airlock)
+		let compose = (compose-config $app_source_dir --stand-ins $stand_ins)
 		let images = (buildkit-images $app_source_dir $compose $build_svcs $app_info.name $app_meta.image.tag --platform ($target_env.platform? | default ""))
 		# The primary runs the database's base where its stage only copies files onto it (k8s.cue's imageName).
 		let base = ($compose | database-base)
 		if ($base | is-empty) { $images } else { $images | insert "database-base" (database-base-copy $base $app_info.name) }
 	} else {
-		let bake_targets = (bake-images $app_source_dir (compose-config $app_source_dir --no-airlock=$no_airlock) $build_svcs --platform ($target_env.platform? | default ""))
+		let bake_targets = (bake-images $app_source_dir (compose-config $app_source_dir --stand-ins $stand_ins) $build_svcs --platform ($target_env.platform? | default ""))
 		let built = ($build_svcs | each {|svc|
 			let local = ($bake_targets | get $svc | get tags | where {|t| $t ends-with ":latest" } | first)
 			# The database's tag is its Postgres major, which CloudNativePG reads; the
@@ -2408,12 +2447,12 @@ export def main [
 		} | reduce -f {} {|it, acc| $acc | insert $it.svc $it.ref })
 		# A node's build (Docker here, pushed through the SSH tunnel) gives the primary the base as well (PRONTO-537):
 		# only the buildkit build did, so Bonk Chess's primary was recreated by every release that changed a replayed file.
-		let base = if $target_env.build.by == "node" and ($push_registry | is-not-empty) { (compose-config $app_source_dir --no-airlock=$no_airlock | database-base) } else { null }
+		let base = if $target_env.build.by == "node" and ($push_registry | is-not-empty) { (compose-config $app_source_dir --stand-ins $stand_ins | database-base) } else { null }
 		if ($base | is-empty) { $built } else { $built | insert "database-base" (database-base-copy $base $app_info.name --registry $push_registry) }
 	}
 	# What compose gives the migrate service beyond the database it names.
 	let migrate = if $has_migrate {
-		{migrate: {env: (compose-config $app_source_dir --no-airlock=$no_airlock --json | get services.migrate.environment | reject DATABASE_URL)}}
+		{migrate: {env: (compose-config $app_source_dir --stand-ins $stand_ins --json | get services.migrate.environment | reject DATABASE_URL)}}
 	} else { {} }
 	# The providers compose gives the auth service, and each one's client:
 	# compose refuses to render a provider whose client is unset.
@@ -2421,9 +2460,9 @@ export def main [
 	# a provider through the local broker signs in through its releaseIssuer.
 	let fixed = (^cue export --expression App.auth.oidc --out json $app_info.cue_path | from json | columns)
 	let release_providers = (do { cd $app_source_dir; ^cue export . -e '{if code.capabilities.auth != _|_ {if code.capabilities.auth.provider != _|_ {v: code.capabilities.auth.provider}, if code.capabilities.auth.provider == _|_ {v: {}}}, if code.capabilities.auth == _|_ {v: {}}}.v' --out json } | complete | if $in.exit_code == 0 { $in.stdout | from json } else { {} })
-	let oidc = (auth-provider-environment (compose-config $app_source_dir --no-airlock=$no_airlock --json | get services.auth.environment | reject -o ...$fixed) $release_providers)
-	let crud_schemas = (crud-schemas (compose-config $app_source_dir --no-airlock=$no_airlock --json | get -o services.crud.environment | default {}))
-	let own_env = (app-services-environment (compose-config $app_source_dir --no-airlock=$no_airlock --json) $services $app_meta.own)
+	let oidc = (auth-provider-environment (compose-config $app_source_dir --stand-ins $stand_ins --json | get services.auth.environment | reject -o ...$fixed) $release_providers)
+	let crud_schemas = (crud-schemas (compose-config $app_source_dir --stand-ins $stand_ins --json | get -o services.crud.environment | default {}))
+	let own_env = (app-services-environment (compose-config $app_source_dir --stand-ins $stand_ins --json) $services $app_meta.own)
 	# An issuer the release trusts, TRUSTED_JWKS, for the roles the program
 	# declares: its public keys are checked here, before anything is applied,
 	# and digested so a change of keys rolls crud. Unset, crud verifies the

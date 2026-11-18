@@ -46,7 +46,7 @@ use release.nu [
 	release-plan
 	airlock-refusals
 	compose-config
-	airlock-stand-ins
+	release-stand-ins
 	stale-airlock-cleanup
 	schema-copy-steps
 	release-tree
@@ -1790,7 +1790,7 @@ def test_airlock_refusal_guards [] {
 
 
 def test_stale_airlock_cleanup [] {
-	print "test a tenant's and a metal release remove no airlock, a normal release removes what an earlier one left..."
+	print "test a tenant's release removes no airlock, any other removes what an earlier one left..."
 	let app = "game"
 	# A tenant's publisher may not delete NetworkPolicies (Studio's spec/tenants.cue): nothing is selected, nothing deleted.
 	for env_name in [metal kind gke] {
@@ -1798,17 +1798,16 @@ def test_stale_airlock_cleanup [] {
 		assert equal $t.selectors [] $env_name
 		assert not $t.job
 	}
-	# Metal deploys no airlock on this line: the operator's release leaves none to remove.
-	let m = (stale-airlock-cleanup $app [] false "" metal)
-	assert equal $m.selectors []
-	assert not $m.job
-	# A release without effects removes every airlock and bridge an earlier one left, and its upgrade job.
-	let none = (stale-airlock-cleanup $app [] false "" kind)
-	assert equal ($none.selectors | length) 2
-	assert ($none.selectors.0 | str contains "pronto.dev/bridge=true") $none.selectors.0
-	assert ($none.selectors.1 | str contains "component in (airlock,airlock-mesh)") $none.selectors.1
-	assert equal $none.kinds "service,networkpolicy,secret,configmap"
-	assert $none.job
+	# A release without effects removes every airlock and bridge an earlier one left, and its upgrade job;
+	# metal's is the operator's, who holds the rights, so it does as the others.
+	for env_name in [kind metal] {
+		let none = (stale-airlock-cleanup $app [] false "" $env_name)
+		assert equal ($none.selectors | length) 2
+		assert ($none.selectors.0 | str contains "pronto.dev/bridge=true") $none.selectors.0
+		assert ($none.selectors.1 | str contains "component in (airlock,airlock-mesh)") $none.selectors.1
+		assert equal $none.kinds "service,networkpolicy,secret,configmap"
+		assert $none.job
+	}
 	# A release with an airlock removes only the bridges it no longer deploys.
 	let kept = (stale-airlock-cleanup $app [mail pdf] true "" gke)
 	assert equal ($kept.selectors | length) 1
@@ -1817,25 +1816,56 @@ def test_stale_airlock_cleanup [] {
 }
 
 def test_compose_stand_ins [] {
-	print "test where no airlock deploys, compose is read with stand-ins for the airlock's required variables alone..."
+	print "test where no airlock deploys, compose is read with stand-ins for what only the airlock side requires..."
+	let req = {|k| $"${($k):?($k) is required: an effect declares it}" }
 	let dir = (mktemp -d -t stand-ins.XXXXXX | str trim)
-	{services: {
-		airlock: {image: "a:test", environment: {ACQUIRER_KEY: "${ACQUIRER_KEY:?ACQUIRER_KEY is required: an effect declares it}", SHARED: "${SHARED:?shared}", LITERAL: "$${NOT_A_VAR:?x}"}}
-		billing: {image: "b:test", environment: {SHARED: "${SHARED}"}}
-	}} | to yaml | save -f ($dir | path join compose.yaml)
-	let raw = (do { cd $dir; docker compose config --no-interpolate --format json } | from json)
-	assert equal (airlock-stand-ins $raw) {ACQUIRER_KEY: secretKeyRef} "SHARED is billing's too: never a stand-in"
-	assert equal (airlock-stand-ins {services: {billing: {image: x}}}) {} "no airlock, none"
-	# A plain read fails on the effect's secret, as mecha writes it.
-	let plain = (try { with-env {ACQUIRER_KEY: null, SHARED: "v"} { compose-config $dir --services }; "" } catch {|e| $e.msg })
-	assert ($plain | str contains "ACQUIRER_KEY is required: an effect declares it") $plain
-	# Where no airlock deploys, it parses without the operator exporting it.
-	assert equal (with-env {ACQUIRER_KEY: null, SHARED: "v"} { compose-config $dir --services --no-airlock } | sort) [airlock billing]
-	# The operator's value wins over a stand-in.
-	assert equal (with-env {ACQUIRER_KEY: "operator", SHARED: "v"} { compose-config $dir --json --no-airlock } | get services.airlock.environment.ACQUIRER_KEY) "operator"
-	# A variable another service reads still fails, naming it.
-	let shared = (try { with-env {ACQUIRER_KEY: null, SHARED: null} { compose-config $dir --services --no-airlock }; "" } catch {|e| $e.msg })
-	assert ($shared | str contains "SHARED") $shared
+	mkdir ($dir | path join inc)
+	# `include` with a defaulted variable in its path, as every app's compose has.
+	{services: {inc-svc: {image: "i:test"}}} | to yaml | save -f ($dir | path join inc a.yaml)
+	{
+		include: [{path: 'inc/${INC_MODE:-a}.yaml'}]
+		services: {
+			airlock: {image: "a:test", environment: {ALONE: (do $req ALONE), BRACED: (do $req BRACED), PASS_MAP: (do $req PASS_MAP), PASS_LIST: (do $req PASS_LIST), PASS_EQ: (do $req PASS_EQ), UNBRACED: (do $req UNBRACED), LABEL: (do $req LABEL), CMD: (do $req CMD), ARG: (do $req ARG), TOP: (do $req TOP), MORE: (do $req MORE), LITERAL: "$${NOT_A_VAR:?x}"}}
+			airlock-mesh: {image: "m:test", environment: {BRIDGE_MAIL_URL: "http://smtp:8080", AIRLOCK_BRIDGES: "mail"}}
+			smtp: {image: "s:test", environment: {SMTP_PASSWORD: (do $req SMTP_PASSWORD)}}
+			airlock-upgrade: {image: "u:test", environment: {UPGRADE_KEY: (do $req UPGRADE_KEY)}}
+			billing: {image: "b:test", environment: {BRACED: '${BRACED}', PASS_MAP: null, PASS_LIST: null}, labels: {l: '${LABEL}'}, command: 'run --key $UNBRACED $${CMD}'}
+			pager: {image: "p:test", environment: ["PASS_LIST", "PASS_EQ="], build: {context: ".", args: ["ARG"]}}
+			other: {image: "o:test", configs: ["c"], environment: {NOT_MORE: '${MORE_THAN}'}}
+		}
+		configs: {c: {content: '${TOP}'}}
+	} | to yaml | save -f ($dir | path join compose.yaml)
+	let all_set = {ALONE: a, BRACED: b, PASS_MAP: c, PASS_LIST: d, PASS_EQ: e, UNBRACED: f, LABEL: g, CMD: h, ARG: i, TOP: j, MORE: k, SMTP_PASSWORD: l, UPGRADE_KEY: m}
+	let alone = [ALONE CMD MORE PASS_EQ SMTP_PASSWORD UPGRADE_KEY]
+	let unset = ($alone | reduce -f $all_set {|k, acc| $acc | upsert $k null })
+	# Read plainly where nothing is unset: no stand-ins; and none where an airlock deploys.
+	assert equal (with-env $all_set { release-stand-ins $dir true }) {} "readable plainly: no stand-ins"
+	assert equal (with-env $unset { release-stand-ins $dir false }) {} "an airlock deploys: none"
+	# Unset, what only the airlock side requires (the airlock's, its upgrade job's and a bridge's container's, and
+	# `${MORE}` beside a service that reads `${MORE_THAN}`; an escaped $${CMD} is no read) takes a stand-in.
+	let made = (with-env $unset { release-stand-ins $dir true })
+	assert equal ($made | columns | sort) $alone $"($made | columns)"
+	# The operator's value is kept: a variable it sets is not missing.
+	let operators = (with-env ($unset | upsert ALONE "operator") { release-stand-ins $dir true })
+	assert ("ALONE" not-in $operators) "the operator's value wins over a stand-in"
+	# Plain, an unset effect secret fails as mecha writes it; with the stand-ins it parses, `include` and all.
+	let plain = (try { with-env $unset { compose-config $dir --services }; "" } catch {|e| $e.msg })
+	assert ($plain | str contains "is required: an effect declares it") $plain
+	let services = (with-env $unset { compose-config $dir --services --stand-ins $made } | sort)
+	assert ("inc-svc" in $services) $"include read: ($services)"
+	assert ("airlock" in $services)
+	# A variable another service reads still fails, naming it and its reader: a reference, a pass-through (a map
+	# key, a list entry), an unbraced one, a label, a build arg, a top-level config.
+	for k in [BRACED PASS_MAP PASS_LIST UNBRACED LABEL ARG TOP] {
+		let shared = (try { with-env ($unset | upsert $k null) { release-stand-ins $dir true }; "" } catch {|e| $e.msg })
+		assert ($shared | str contains $"($k) is an effect's secret and also read by") $"($k): ($shared)"
+	}
+	# What a service's env_file interpolates is a read too.
+	"LEAK=${ALONE}\n" | save -f ($dir | path join .env)
+	let filed = (open ($dir | path join compose.yaml) | upsert services.other.env_file [".env"])
+	$filed | to yaml | save -f ($dir | path join compose.yaml)
+	let any = (try { with-env $unset { release-stand-ins $dir true }; "" } catch {|e| $e.msg })
+	assert ($any | str contains "also read by other") $any
 	rm -r $dir
 }
 
