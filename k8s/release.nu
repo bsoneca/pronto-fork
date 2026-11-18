@@ -1281,12 +1281,34 @@ export def copy-schema [source_ns: string, target: record, --pgroll] {
 	}
 }
 
+# Each variable the airlock service requires (`${K:?...}`, how mecha writes an effect's secret that is not
+# simulated) that no other service reads: a release that deploys no airlock (metal, a tenant) reads compose
+# with a stand-in for it, so compose parses and the operator need not export what nothing here uses. A
+# service that reads the name too gets the environment's value, so a missing one still fails, naming the
+# variable. `raw` is the project as `docker compose config --no-interpolate --format json` gives it.
+export def airlock-stand-ins [raw: record]: nothing -> record {
+	let services = ($raw.services? | default {})
+	if "airlock" not-in $services { return {} }
+	let required = ($services.airlock | to json --raw | str replace -a '$$' '' | parse -r '\$\{(?<k>[A-Za-z_][A-Za-z0-9_]*):\?' | get k | uniq)
+	let others = ($services | transpose name svc | where name != "airlock")
+	$required | where {|k|
+		let read = ('\$\{?' + $k + '\b')
+		not ($others | any {|o| ($o.svc.env_file? | default [] | is-not-empty) or (($o.svc | to json --raw | str replace -a '$$' '') =~ $read) })
+	} | reduce -f {} {|k, acc| $acc | insert $k "secretKeyRef" }
+}
+
 # The app's compose project: as text, as JSON (--json) or its services' names (--services). Read with
 # no seal key in the environment, so the airlock's shows the local stack's default, the development
-# key the release refuses (seal-keys).
-export def compose-config [app_dir: string, --json, --services]: nothing -> any {
+# key the release refuses (seal-keys). `--no-airlock`: the release deploys none (metal, a tenant), so
+# the airlock's own required variables take stand-ins where the environment sets none (airlock-stand-ins).
+export def compose-config [app_dir: string, --json, --services, --no-airlock]: nothing -> any {
 	let args = if $services { ["--services"] } else if $json { ["--format" "json"] } else { [] }
-	let r = (do { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd $app_dir; ^docker compose --profile "*" config ...$args } | complete)
+	let stand = if $no_airlock {
+		let raw = (do { cd $app_dir; ^docker compose --profile "*" config --no-interpolate --format json } | complete)
+		if $raw.exit_code != 0 { error make { msg: ($raw.stderr | str trim) } }
+		airlock-stand-ins ($raw.stdout | from json) | items {|k, v| if ($env | get -o $k | default "" | is-empty) { {($k): $v} } else { {} } } | into record
+	} else { {} }
+	let r = (with-env $stand { hide-env -i AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS; cd $app_dir; ^docker compose --profile "*" config ...$args } | complete)
 	if $r.exit_code != 0 { error make { msg: ($r.stderr | str trim) } }
 	if $services { $r.stdout | lines } else if $json { $r.stdout | from json } else { $r.stdout }
 }
@@ -2152,6 +2174,19 @@ def run-wall-probes [app: string, namespace: string, image: record, probes: list
 	print $"The airlock's wall holds: ($found | each {|p| {($p.as): $p.result.last} } | reduce -f {} {|r, acc| $acc | merge $r } | to json --raw)"
 }
 
+# What a release removes of an earlier release's airlock and bridges: the label selectors of their
+# workloads, the kinds deleted once their pods are gone, and whether the upgrade job goes. A tenant's
+# release has none to remove (it deploys no airlock: airlock-refusals) and its publisher's ClusterRole
+# holds no right on NetworkPolicies (Studio's spec/tenants.cue), so the delete is Forbidden after the
+# rollout; metal deploys no airlock on this line (release-airlock) and none was ever left there.
+export def stale-airlock-cleanup [app: string, current: list<string>, has_airlock: bool, tenant: string, cluster_env: string]: nothing -> record {
+	let kinds = "service,networkpolicy,secret,configmap"
+	if ($tenant | is-not-empty) or $cluster_env == "metal" { return {selectors: [], kinds: $kinds, job: false} }
+	let gone = if ($current | is-empty) { "" } else { $",app.kubernetes.io/component notin \(($current | str join ',')\)" }
+	let selectors = [$"app.kubernetes.io/name=($app),pronto.dev/bridge=true($gone)"] | append (if $has_airlock { [] } else { [$"app.kubernetes.io/name=($app),app.kubernetes.io/component in \(airlock,airlock-mesh\)"] })
+	{selectors: $selectors, kinds: $kinds, job: (not $has_airlock)}
+}
+
 # Main entrypoint for release@k8s
 export def main [
 	--snapshot               # Build and render only, do not deploy
@@ -2222,7 +2257,9 @@ export def main [
 
 	# The caddy image proxies its SSR routes to `render` whenever the app builds one,
 	# so a release that omits it serves 502 on every rendered page.
-	let compose_services = (compose-config $app_source_dir --services)
+	# Where no airlock is deployed (metal, a tenant), compose is read with stand-ins for its required variables.
+	let no_airlock = ($cluster_env == "metal" or ($tenant | is-not-empty))
+	let compose_services = (compose-config $app_source_dir --no-airlock=$no_airlock --services)
 	let compose_render = ("render" in $compose_services)
 	if $compose_render != $has_render {
 		error make { msg: $"($app_info.cue_path): render.enabled is ($has_render) but the app's compose project (if $compose_render { 'defines' } else { 'lacks' }) a render service" }
@@ -2315,7 +2352,7 @@ export def main [
 	# migrate runs where the app has ledger migrations or permissions to reconcile, as in compose.
 	let has_migrate = ("migrate" in $compose_services)
 	# What runs beside the cluster (runtime.cue), built from the app's compose services as the cluster's own are.
-	let compose = (compose-config $app_source_dir --json)
+	let compose = (compose-config $app_source_dir --no-airlock=$no_airlock --json)
 	let airlock = (release-airlock $app_source_dir $cluster_env (open ($app_source_dir | path join .pronto cluster.json)))
 	let has_airlock = ($airlock | is-not-empty)
 	let airlock_svcs = if $has_airlock { ["airlock" "airlock-mesh" "airlock-upgrade"] | append ($airlock.bridges | values | get build | uniq) } else { [] }
@@ -2331,7 +2368,7 @@ export def main [
 	let pushed = if $is_tenant {
 		let given = if ($buildkit | is-not-empty) {
 			# Pushed with the builder's own rights: the publisher's KUBECONFIG is set aside for it.
-			let compose = (compose-config $app_source_dir)
+			let compose = (compose-config $app_source_dir --no-airlock=$no_airlock)
 			let push_env = if ($push_kubeconfig | is-not-empty) { {KUBECONFIG: $push_kubeconfig} } else { {} }
 			# A closure's environment is its own: the publisher's KUBECONFIG is back once it returns.
 			do {
@@ -2346,13 +2383,13 @@ export def main [
 		cloud-build-images $app_source_dir $app_info.name $build_svcs $target_env $app_meta.image.tag
 	} else if $target_env.build.by == "buildkit" {
 		ensure-node-buildkit
-		let compose = (compose-config $app_source_dir)
+		let compose = (compose-config $app_source_dir --no-airlock=$no_airlock)
 		let images = (buildkit-images $app_source_dir $compose $build_svcs $app_info.name $app_meta.image.tag --platform ($target_env.platform? | default ""))
 		# The primary runs the database's base where its stage only copies files onto it (k8s.cue's imageName).
 		let base = ($compose | database-base)
 		if ($base | is-empty) { $images } else { $images | insert "database-base" (database-base-copy $base $app_info.name) }
 	} else {
-		let bake_targets = (bake-images $app_source_dir (compose-config $app_source_dir) $build_svcs --platform ($target_env.platform? | default ""))
+		let bake_targets = (bake-images $app_source_dir (compose-config $app_source_dir --no-airlock=$no_airlock) $build_svcs --platform ($target_env.platform? | default ""))
 		let built = ($build_svcs | each {|svc|
 			let local = ($bake_targets | get $svc | get tags | where {|t| $t ends-with ":latest" } | first)
 			# The database's tag is its Postgres major, which CloudNativePG reads; the
@@ -2371,12 +2408,12 @@ export def main [
 		} | reduce -f {} {|it, acc| $acc | insert $it.svc $it.ref })
 		# A node's build (Docker here, pushed through the SSH tunnel) gives the primary the base as well (PRONTO-537):
 		# only the buildkit build did, so Bonk Chess's primary was recreated by every release that changed a replayed file.
-		let base = if $target_env.build.by == "node" and ($push_registry | is-not-empty) { (compose-config $app_source_dir | database-base) } else { null }
+		let base = if $target_env.build.by == "node" and ($push_registry | is-not-empty) { (compose-config $app_source_dir --no-airlock=$no_airlock | database-base) } else { null }
 		if ($base | is-empty) { $built } else { $built | insert "database-base" (database-base-copy $base $app_info.name --registry $push_registry) }
 	}
 	# What compose gives the migrate service beyond the database it names.
 	let migrate = if $has_migrate {
-		{migrate: {env: (compose-config $app_source_dir --json | get services.migrate.environment | reject DATABASE_URL)}}
+		{migrate: {env: (compose-config $app_source_dir --no-airlock=$no_airlock --json | get services.migrate.environment | reject DATABASE_URL)}}
 	} else { {} }
 	# The providers compose gives the auth service, and each one's client:
 	# compose refuses to render a provider whose client is unset.
@@ -2384,9 +2421,9 @@ export def main [
 	# a provider through the local broker signs in through its releaseIssuer.
 	let fixed = (^cue export --expression App.auth.oidc --out json $app_info.cue_path | from json | columns)
 	let release_providers = (do { cd $app_source_dir; ^cue export . -e '{if code.capabilities.auth != _|_ {if code.capabilities.auth.provider != _|_ {v: code.capabilities.auth.provider}, if code.capabilities.auth.provider == _|_ {v: {}}}, if code.capabilities.auth == _|_ {v: {}}}.v' --out json } | complete | if $in.exit_code == 0 { $in.stdout | from json } else { {} })
-	let oidc = (auth-provider-environment (compose-config $app_source_dir --json | get services.auth.environment | reject -o ...$fixed) $release_providers)
-	let crud_schemas = (crud-schemas (compose-config $app_source_dir --json | get -o services.crud.environment | default {}))
-	let own_env = (app-services-environment (compose-config $app_source_dir --json) $services $app_meta.own)
+	let oidc = (auth-provider-environment (compose-config $app_source_dir --no-airlock=$no_airlock --json | get services.auth.environment | reject -o ...$fixed) $release_providers)
+	let crud_schemas = (crud-schemas (compose-config $app_source_dir --no-airlock=$no_airlock --json | get -o services.crud.environment | default {}))
+	let own_env = (app-services-environment (compose-config $app_source_dir --no-airlock=$no_airlock --json) $services $app_meta.own)
 	# An issuer the release trusts, TRUSTED_JWKS, for the roles the program
 	# declares: its public keys are checked here, before anything is applied,
 	# and digested so a change of keys rolls crud. Unset, crud verifies the
@@ -2587,9 +2624,8 @@ export def main [
 	# Their pods go first, waited for, and their policies after, so none
 	# outlives its wall.
 	let current = if $has_airlock { $airlock.bridges | columns } else { [] }
-	let gone = if ($current | is-empty) { "" } else { $",app.kubernetes.io/component notin \(($current | str join ',')\)" }
-	let selectors = [$"app.kubernetes.io/name=($rname),pronto.dev/bridge=true($gone)"] | append (if $has_airlock { [] } else { [$"app.kubernetes.io/name=($rname),app.kubernetes.io/component in \(airlock,airlock-mesh\)"] })
-	for selector in $selectors {
+	let stale = (stale-airlock-cleanup $rname $current $has_airlock $tenant $cluster_env)
+	for selector in $stale.selectors {
 		kubectl-ok delete deployment -n $target_ns -l $selector --cascade=foreground --wait=true --ignore-not-found
 		let deadline = (date now) + 300sec
 		loop {
@@ -2598,9 +2634,9 @@ export def main [
 			if (date now) > $deadline { error make {msg: $"($left | get metadata.name | str join ', ') still run: their policies stay"} }
 			sleep 2sec
 		}
-		kubectl-ok delete service,networkpolicy,secret,configmap -n $target_ns -l $selector --ignore-not-found
+		kubectl-ok delete $stale.kinds -n $target_ns -l $selector --ignore-not-found
 	}
-	if not $has_airlock {
+	if $stale.job {
 		kubectl-ok delete job $"($rname)-airlock-upgrade" -n $target_ns --ignore-not-found
 	}
 	# The renderer reads the app through the door once, as it starts: one that rolled beside the door

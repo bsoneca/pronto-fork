@@ -46,6 +46,8 @@ use release.nu [
 	release-plan
 	airlock-refusals
 	compose-config
+	airlock-stand-ins
+	stale-airlock-cleanup
 	schema-copy-steps
 	release-tree
 	release-override
@@ -102,6 +104,8 @@ def run-tests [] {
 	test_native_runtime
 	test_release_plan
 	test_airlock_refusal_guards
+	test_stale_airlock_cleanup
+	test_compose_stand_ins
 	test_airlock_manifests
 	test_airlock_wall
 	test_wall_probes
@@ -1784,6 +1788,56 @@ def test_airlock_refusal_guards [] {
 	assert equal (airlock-refusals false "game-1" "pr-7") [] "no effects, no refusal"
 }
 
+
+def test_stale_airlock_cleanup [] {
+	print "test a tenant's and a metal release remove no airlock, a normal release removes what an earlier one left..."
+	let app = "game"
+	# A tenant's publisher may not delete NetworkPolicies (Studio's spec/tenants.cue): nothing is selected, nothing deleted.
+	for env_name in [metal kind gke] {
+		let t = (stale-airlock-cleanup $app [] false "game-1" $env_name)
+		assert equal $t.selectors [] $env_name
+		assert not $t.job
+	}
+	# Metal deploys no airlock on this line: the operator's release leaves none to remove.
+	let m = (stale-airlock-cleanup $app [] false "" metal)
+	assert equal $m.selectors []
+	assert not $m.job
+	# A release without effects removes every airlock and bridge an earlier one left, and its upgrade job.
+	let none = (stale-airlock-cleanup $app [] false "" kind)
+	assert equal ($none.selectors | length) 2
+	assert ($none.selectors.0 | str contains "pronto.dev/bridge=true") $none.selectors.0
+	assert ($none.selectors.1 | str contains "component in (airlock,airlock-mesh)") $none.selectors.1
+	assert equal $none.kinds "service,networkpolicy,secret,configmap"
+	assert $none.job
+	# A release with an airlock removes only the bridges it no longer deploys.
+	let kept = (stale-airlock-cleanup $app [mail pdf] true "" gke)
+	assert equal ($kept.selectors | length) 1
+	assert ($kept.selectors.0 | str contains "notin (mail,pdf)") $kept.selectors.0
+	assert not $kept.job
+}
+
+def test_compose_stand_ins [] {
+	print "test where no airlock deploys, compose is read with stand-ins for the airlock's required variables alone..."
+	let dir = (mktemp -d -t stand-ins.XXXXXX | str trim)
+	{services: {
+		airlock: {image: "a:test", environment: {ACQUIRER_KEY: "${ACQUIRER_KEY:?ACQUIRER_KEY is required: an effect declares it}", SHARED: "${SHARED:?shared}", LITERAL: "$${NOT_A_VAR:?x}"}}
+		billing: {image: "b:test", environment: {SHARED: "${SHARED}"}}
+	}} | to yaml | save -f ($dir | path join compose.yaml)
+	let raw = (do { cd $dir; docker compose config --no-interpolate --format json } | from json)
+	assert equal (airlock-stand-ins $raw) {ACQUIRER_KEY: secretKeyRef} "SHARED is billing's too: never a stand-in"
+	assert equal (airlock-stand-ins {services: {billing: {image: x}}}) {} "no airlock, none"
+	# A plain read fails on the effect's secret, as mecha writes it.
+	let plain = (try { with-env {ACQUIRER_KEY: null, SHARED: "v"} { compose-config $dir --services }; "" } catch {|e| $e.msg })
+	assert ($plain | str contains "ACQUIRER_KEY is required: an effect declares it") $plain
+	# Where no airlock deploys, it parses without the operator exporting it.
+	assert equal (with-env {ACQUIRER_KEY: null, SHARED: "v"} { compose-config $dir --services --no-airlock } | sort) [airlock billing]
+	# The operator's value wins over a stand-in.
+	assert equal (with-env {ACQUIRER_KEY: "operator", SHARED: "v"} { compose-config $dir --json --no-airlock } | get services.airlock.environment.ACQUIRER_KEY) "operator"
+	# A variable another service reads still fails, naming it.
+	let shared = (try { with-env {ACQUIRER_KEY: null, SHARED: null} { compose-config $dir --services --no-airlock }; "" } catch {|e| $e.msg })
+	assert ($shared | str contains "SHARED") $shared
+	rm -r $dir
+}
 
 def test_replicas_budget_spread [] {
 	print "test a workload's replicas, its preview's count, a budget of all but one and spread over the nodes..."
