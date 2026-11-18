@@ -298,6 +298,11 @@ _sqlType: {
 #tableSql: T={
 	e: _
 	columns!: #machineColumns
+	// Row-level security is enabled with the table, in the migration that
+	// creates it, so a database built from 005 alone never holds a table that
+	// is readable until 006 runs. 006 states it again (idempotent): it is
+	// replayed over live databases. Set where 006 would (the entity has access).
+	rls: *false | bool
 	_lines: list.Concat([
 		[for fld in T.e.fields {
 			let column = #machineColumn & {columns: T.columns, entityName: T.e.name, fieldName: fld.name}
@@ -383,7 +388,7 @@ _sqlType: {
 		] {
 			"ALTER TABLE \(T.e.table) DROP CONSTRAINT IF EXISTS \"\(T.e.table)_\(fld.name)_check\", ADD CONSTRAINT \"\(T.e.table)_\(fld.name)_check\" CHECK (\(check)) NOT VALID;"
 		}]
-	out: "CREATE TABLE IF NOT EXISTS \(T.e.table) (\n" + strings.Join(_lines, ",\n") + "\n);" + strings.Join([for a in _added {"\n" + a}], "") + strings.Join([for a in _reasserted {"\n" + a}], "")
+	out: "CREATE TABLE IF NOT EXISTS \(T.e.table) (\n" + strings.Join(_lines, ",\n") + "\n);" + strings.Join([for a in _added {"\n" + a}], "") + strings.Join([for a in _reasserted {"\n" + a}], "") + [if T.rls {"\nALTER TABLE \(T.e.table) ENABLE ROW LEVEL SECURITY;"}, ""][0]
 }
 
 #sqlLit: L={
@@ -4202,7 +4207,7 @@ _pgrollDir: "services/database/pgroll"
 					format: "sql"
 					_indexLines: list.Concat([for ent in E._baseServer if ent.indexes != _|_ {(#indexSql & {e: ent}).out}])
 					text: strings.Join(list.Concat([
-						[for ent in (#tableOrder & {entities: E._baseServer}).out {(#tableSql & {e: ent, columns: E.code._machineColumns}).out}],
+						[for ent in (#tableOrder & {entities: E._baseServer}).out {(#tableSql & {e: ent, columns: E.code._machineColumns, if ent.access != _|_ {rls: true}}).out}],
 						[if len(_indexLines) > 0 {strings.Join(_indexLines, "\n")}],
 						[if len(E._uniqueLines) > 0 {strings.Join(E._uniqueLines, "\n")}],
 					]), "\n\n") + "\n"
