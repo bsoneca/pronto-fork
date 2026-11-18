@@ -1362,6 +1362,8 @@ _sqlType: {
 	e: {access: #Access, ...}
 	entities: _ // parent lookup for folder scope
 	_t: P.e.table
+	// Only a public entity may be read without a token (access.anon, schema.cue).
+	_anonOn: [if P.e.access.scope == "public" if P.e.access["anon"] != _|_ if P.e.access.anon == true {true}, false][0]
 	if P.e.access.scope == "private" {
 		_using: (#ownedUsing & {a: P.e.access, qual: P._t, table: P._t}).out
 		// The helper runs as the migration superuser, so its read of the via
@@ -1404,16 +1406,11 @@ _sqlType: {
 	}
 	if P.e.access.scope == "public" {
 		_pre: []
-		_anonOn: [if P.e.access["anon"] != _|_ if P.e.access.anon == true {true}, false][0]
 		_appUser: list.Concat([
 			[(#policy & {name: "\(P._t)_app_user_select", table: P._t, rest: "FOR SELECT TO app_user USING (true)"}).out],
-			// #policy drops only the names it still emits, so a withdrawn
-			// access.anon would leave <t>_anon_select alive on a live database
-			// through every replay: absent or not true drops it explicitly.
 			[if P._anonOn {
 				(#policy & {name: "\(P._t)_anon_select", table: P._t, rest: "FOR SELECT TO anon USING (true)"}).out
 			}],
-			[if !P._anonOn {"DROP POLICY IF EXISTS \(P._t)_anon_select ON \(P._t);"}],
 			[if P.e.access["write"] != _|_ if P.e.access.write == true || P.e.access.write == "update" {
 				(#policy & {name: "\(P._t)_app_user_write", table: P._t, rest: "FOR ALL TO app_user USING (true) WITH CHECK (true)"}).out
 			}],
@@ -1471,6 +1468,11 @@ _sqlType: {
 		// fails the policy here, where a guard that asks whether a field is there would read it as absent.
 		[if json.Marshal(P.e.access) == "" {""}],
 		P._pre,
+		// #policy drops only the names it still emits, so an entity that loses
+		// access.anon, or leaves public scope, would keep <t>_anon_select alive on
+		// a live database through every replay, and anon holds SELECT on every
+		// table: every scope but an anon public one drops it explicitly.
+		[if !P._anonOn {"DROP POLICY IF EXISTS \(P._t)_anon_select ON \(P._t);"}],
 		P._scopeTrigger,
 		// The floor's text lives in mecha's rls.sql and is called, never
 		// restated, so a generator cannot emit a subtly wrong one.
