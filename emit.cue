@@ -1406,6 +1406,9 @@ _sqlType: {
 		_pre: []
 		_appUser: list.Concat([
 			[(#policy & {name: "\(P._t)_app_user_select", table: P._t, rest: "FOR SELECT TO app_user USING (true)"}).out],
+			[if P.e.access["anon"] != _|_ if P.e.access.anon == true {
+				(#policy & {name: "\(P._t)_anon_select", table: P._t, rest: "FOR SELECT TO anon USING (true)"}).out
+			}],
 			[if P.e.access["write"] != _|_ if P.e.access.write == true || P.e.access.write == "update" {
 				(#policy & {name: "\(P._t)_app_user_write", table: P._t, rest: "FOR ALL TO app_user USING (true) WITH CHECK (true)"}).out
 			}],
@@ -4123,9 +4126,10 @@ _pgrollDir: "services/database/pgroll"
 						"""
 				}
 
-				// Auth'd grants: anon can connect (USAGE) but touches no table —
-				// every row read or written goes through app_user or service,
-				// where 006's policies decide.
+				// Auth'd grants: anon can connect (USAGE) and is granted every table
+				// below, but RLS decides: only an entity with access.anon gets an
+				// anon policy (a SELECT); every other row read or written goes
+				// through app_user or service, where 006's policies decide.
 				if E._authOn {
 					text: """
 						GRANT USAGE ON SCHEMA public TO anon, app_user, service;
