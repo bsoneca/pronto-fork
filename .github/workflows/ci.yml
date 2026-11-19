@@ -81,10 +81,11 @@ jobs:
         working-directory: ${{ runner.temp }}/monorepo/plugins/pronto
         env:
           MISE_LOCKED: "false"
+        # hydra's plain Linux build has no sqlite3, which its tests use: take the sqlite asset.
         run: |
           "$MISE" trust -q .
           list="$GITHUB_WORKSPACE/ci-monorepo-tests.txt"
-          tools=(github:nushell/nushell@0.116.1 github:ory/hydra@26.2.0 github:caddyserver/caddy@2.11.7)
+          tools=(github:nushell/nushell@0.116.1 "github:ory/hydra[asset_pattern=hydra_*-linux_sqlite_64bit.tar.gz]@26.2.0" github:caddyserver/caddy@2.11.7)
           # shellcheck disable=SC2046
           "$MISE" exec "${tools[@]}" -- deno test -A --no-check --parallel $(grep -v '^bundle/' "$list")
           # shellcheck disable=SC2046
