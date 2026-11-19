@@ -62,7 +62,11 @@ jobs:
           # shellcheck disable=SC2046
           "$MISE" exec github:nushell/nushell@0.116.1 -- deno test -A --no-check $(cat ci-tests.txt)
       # The door's several sites against the Caddyfile that ships, on the caddy mecha's door runs.
+      # caddy and hydra are pinned by version here, not in .mise.toml, so mise.lock has no entry
+      # for them: these two steps install them unlocked.
       - name: Door sites
+        env:
+          MISE_LOCKED: "false"
         run: '"$MISE" exec github:caddyserver/caddy@2.11.7 -- deno test -A --no-check caddy-sites.integration.test.ts'
       # The monorepo around this checkout: plugins/pronto beside omnishell, mecha, sayt and bayt, the
       # imports back on bonisoft.org, mecha, omnishell and bootstrap's lock as the fork publishes them
@@ -75,6 +79,8 @@ jobs:
         run: '"$MISE" exec -- .github/monorepo.sh "$RUNNER_TEMP/monorepo"'
       - name: Monorepo tests
         working-directory: ${{ runner.temp }}/monorepo/plugins/pronto
+        env:
+          MISE_LOCKED: "false"
         run: |
           "$MISE" trust -q .
           list="$GITHUB_WORKSPACE/ci-monorepo-tests.txt"
