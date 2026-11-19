@@ -181,7 +181,11 @@ package schema
 		registry:         string & !=""
 		gatewayClassName: *"eg" | string
 		storageClass:     *"standard-rwo" | string
-		imagePullPolicy:  "Always"
+		// A release pins every image it deploys by digest, so a node that
+		// already holds the image holds exactly the content a pull would
+		// fetch. IfNotPresent lets a pod restart while the registry is down;
+		// an app whose cluster must always ask the registry sets "Always".
+		imagePullPolicy:  *"IfNotPresent" | "Always"
 		domainSuffix:     string & !=""
 		platform:         "linux/amd64"
 	}

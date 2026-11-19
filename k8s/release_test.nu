@@ -609,6 +609,10 @@ def test_native_runtime [] {
 		let rendered = (render-manifests $app.cue_path $target)
 		assert not ($rendered | str contains "dev-password")
 		let deployments = ($rendered | from yaml | where kind == Deployment)
+		# A prepared cluster holds digest-pinned images and restarts pods without
+		# the registry; kind keeps asking it.
+		let pulls = ($deployments | get spec.template.spec.containers | flatten | get imagePullPolicy | uniq)
+		assert equal $pulls [(if $target == gke { "IfNotPresent" } else { "Always" })]
 		for service in [{name: compute, database: DATABASE_URL}] {
 			let variables = ($deployments | where metadata.name == $"native-($service.name)" | first | get spec.template.spec.containers.0.env)
 			let password = ($variables | where name == PGPASSWORD | first)
