@@ -37,6 +37,16 @@ use release.nu [
 	wall-verdict
 	wall_probe_program
 	unranged-pod-addresses
+	ensure-shared-components
+	render-observability
+	operators-snapshot
+	operators-changes
+	operators-plan
+	lease-expired
+	acquire-operators-lock
+	release-operators-lock
+	read-operators-record
+	write-operators-record
 ]
 
 def main [] {
@@ -78,6 +88,9 @@ def run-tests [] {
 	test_release_k8s_dry_run_cli
 	test_release_nu_k8s_platform_cli
 	test_cloud_release_refused
+	test_operators_snapshot
+	test_operators_plan
+	test_operators_lock
 
 	print "\nAll release-k8s tests passed!"
 }
@@ -1051,4 +1064,128 @@ def test_airlock_refusals [] {
 	assert ($cnpg | str contains "names container effects-db-rw, which the database's Service names") $cnpg
 	# An app without effects renders no airlock.
 	assert ((render-manifests (resolve-app ($fixtures_dir | path join sample)).cue_path kind) | from yaml | where {|d| $d.metadata.name =~ airlock } | is-empty)
+}
+
+def test_operators_snapshot [] {
+	print "test the operator digest is stable under order and moves with any entry..."
+	let base = (operators-snapshot $OPERATORS "obs")
+	assert equal ((operators-snapshot ($OPERATORS | reverse) "obs").hash) $base.hash
+	# Only the install-relevant fields count: a dependent's Deployment names do not.
+	assert equal ((operators-snapshot ($OPERATORS | each {|e| $e | upsert check_deployments [x] }) "obs").hash) $base.hash
+	let dapr = ($OPERATORS | where name == dapr | first)
+	let with = {|f| operators-snapshot ($OPERATORS | each {|e| if $e.name == dapr { do $f $e } else { $e } }) "obs" }
+	for changed in [
+		(do $with {|e| $e | upsert url "https://example.test/dapr-1.15.0.tgz" })
+		(do $with {|e| $e | upsert checksum "sha256:00" })
+		(do $with {|e| $e | upsert set ["dapr_rbac.secretReader.enabled=true"] })
+		(do $with {|e| $e | upsert set ($e.set | append "x=y") })
+		(operators-snapshot ($OPERATORS | where name != dapr) "obs")
+		(operators-snapshot $OPERATORS "other observability manifests")
+	] {
+		assert ($changed.hash != $base.hash)
+	}
+	# --set values compare as a set, not a sequence.
+	let two = (operators-snapshot [{name: a, url: u, checksum: c, set: [x=1 y=2]}] "o")
+	assert equal ((operators-snapshot [{name: a, url: u, checksum: c, set: [y=2 x=1]}] "o").hash) $two.hash
+}
+
+def test_operators_plan [] {
+	print "test the operator decision table..."
+	let desired = (operators-snapshot $OPERATORS "obs")
+	let older = (operators-snapshot ($OPERATORS | each {|e| if $e.name == cnpg { $e | upsert url "https://example.test/cnpg-1.24.0.yaml" | upsert checksum "sha256:aa" } else { $e } }) "obs-old")
+	assert equal (operators-plan null $desired default).action install
+	assert equal (operators-plan null $desired refuse-change).action install
+	assert equal (operators-plan $desired $desired default).action skip
+	assert equal (operators-plan $desired $desired refuse-change).action skip
+	assert equal (operators-plan $desired $desired reinstall).action install
+	let changed = (operators-plan $older $desired default)
+	assert equal $changed.action install
+	assert ("cnpg: url https://example.test/cnpg-1.24.0.yaml -> https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.25.0/cnpg-1.25.0.yaml" in $changed.changes) ($changed.changes | to json)
+	assert ($changed.changes | any {|c| $c | str starts-with "cnpg: checksum sha256:aa -> " })
+	assert ("observability: manifests changed" in $changed.changes)
+	assert equal (operators-plan $older $desired refuse-change).action refuse
+	assert equal (operators-plan $older $desired reinstall).action install
+	let added = (operators-changes (operators-snapshot ($OPERATORS | where name != dapr) "obs") $desired)
+	assert ($added | any {|c| $c | str starts-with "dapr: added" })
+	assert (operators-changes $desired (operators-snapshot ($OPERATORS | where name != dapr) "obs") | any {|c| $c == "dapr: removed" })
+	assert (try { operators-plan null $desired bogus; false } catch { true })
+}
+
+# A kubectl that keeps the one Lease and one ConfigMap the install guard uses in a
+# directory, so the lock and the record run against real calls without a cluster.
+def fake-kubectl [dir: string] {
+	let bin = ($dir | path join bin)
+	mkdir $bin
+	let script = '#!/bin/sh
+store="$FAKE_KUBECTL_DIR/state"
+mkdir -p "$store"
+kind_of() { sed -n "s/.*\"\{0,1\}kind\"\{0,1\}: *\"\{0,1\}\([A-Za-z]*\).*/\\1/p" | head -1 | tr "A-Z" "a-z"; }
+case "$1" in
+get) f="$store/$2"; [ -f "$f" ] && cat "$f" || { echo "Error from server (NotFound): $2 not found" >&2; exit 1; } ;;
+create)
+  if [ "$2" = namespace ]; then echo "kind: Namespace"; exit 0; fi
+  body=$(cat); k=$(echo "$body" | kind_of)
+  [ -f "$store/$k" ] && { echo "Error from server (AlreadyExists)" >&2; exit 1; }
+  echo "$body" > "$store/$k" ;;
+replace|apply) body=$(cat); k=$(echo "$body" | kind_of); [ "$k" = namespace ] || echo "$body" > "$store/$k" ;;
+delete) rm -f "$store/$2" ;;
+*) echo "unexpected kubectl $*" >&2; exit 2 ;;
+esac
+'
+	$script | save -f ($bin | path join kubectl)
+	chmod +x ($bin | path join kubectl)
+	$bin
+}
+
+def test_operators_lock [] {
+	print "test the cluster-side install lock and record..."
+	let now = (date now)
+	let stamp = {|t| $t | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.6fZ" }
+	let lease = {|age| {spec: {holderIdentity: a, leaseDurationSeconds: 60, renewTime: (do $stamp ($now - $age))}}}
+	assert (not (lease-expired (do $lease 30sec) $now))
+	assert (lease-expired (do $lease 90sec) $now)
+	assert (lease-expired {spec: {holderIdentity: ""}} $now)
+
+	let dir = (mktemp -d)
+	let bin = (fake-kubectl $dir)
+	with-env {FAKE_KUBECTL_DIR: $dir, PATH: ($env.PATH | prepend $bin)} {
+		let lease_file = ($dir | path join state lease)
+		acquire-operators-lock one
+		assert ($lease_file | path exists)
+		assert equal (open --raw $lease_file | from json | get spec.holderIdentity) one
+		# A second release finds the lock held and gives up when its wait is over.
+		let refused = (try { acquire-operators-lock two --wait 1sec; "" } catch {|e| $e.msg })
+		assert ($refused | str contains "Another release holds the operator install lock") $refused
+		# Only the holder lets go.
+		release-operators-lock two
+		assert ($lease_file | path exists)
+		release-operators-lock one
+		assert (not ($lease_file | path exists))
+		# An expired lease is taken over with a replace.
+		{apiVersion: "coordination.k8s.io/v1", kind: Lease, metadata: {name: x, resourceVersion: "7"}, spec: {holderIdentity: dead, leaseDurationSeconds: 1, renewTime: (do $stamp ($now - 1min))}} | to json | save -f $lease_file
+		acquire-operators-lock two
+		assert equal (open --raw $lease_file | from json | get spec.holderIdentity) two
+		assert equal (open --raw $lease_file | from json | get metadata.resourceVersion) "7"
+		release-operators-lock two
+
+		# The record round trips and decides the next release.
+		assert equal (read-operators-record) null
+		let snapshot = (operators-snapshot $OPERATORS "obs")
+		write-operators-record $snapshot
+		assert equal (read-operators-record) $snapshot
+		assert equal (operators-plan (read-operators-record) $snapshot default).action skip
+
+		# The guard itself: a record of other entries is refused on request, with the
+		# lock let go, and a record equal to this release's skips the install.
+		let older = (operators-snapshot ($OPERATORS | where name != dapr) "obs")
+		write-operators-record $older
+		let refusal = (try { ensure-shared-components example.test --mode refuse-change; "" } catch {|e| $e.msg })
+		assert ($refusal | str contains "dapr: added") $refusal
+		assert (not ($lease_file | path exists))
+		assert equal (read-operators-record) $older
+		write-operators-record (operators-snapshot $OPERATORS (render-observability example.test))
+		ensure-shared-components example.test --mode refuse-change
+		assert (not ($lease_file | path exists))
+	}
+	rm -r $dir
 }

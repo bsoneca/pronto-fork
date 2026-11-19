@@ -193,19 +193,24 @@ spec:
 	$eg_config | kubectl apply -f -
 }
 
-# Ensure VictoriaMetrics, Jaeger, and Vector observability stack
-export def ensure-observability [
-	domain_suffix: string     # telemetry is served at telemetry.<domain_suffix>
-	--timeout: string = "90s"
-] {
+# The observability manifests, rendered from CUE for one telemetry domain.
+export def render-observability [domain_suffix: string]: nothing -> string {
 	let resolved_path = ($k8s_dir | path join "observability" "observability.cue")
-	print "Ensuring observability stack (VictoriaMetrics + Jaeger + Vector)..."
 	let expr = $"\(#ObservabilityStack & {domainSuffix: \"($domain_suffix)\"}\).manifests"
 	let res = (do { cue export --expression $expr --out text $resolved_path } | complete)
 	if $res.exit_code != 0 {
 		error make { msg: $"Failed to render observability manifests: ($res.stderr)" }
 	}
-	$res.stdout | kubectl apply -f -
+	$res.stdout
+}
+
+# Ensure VictoriaMetrics, Jaeger, and Vector observability stack
+export def ensure-observability [
+	domain_suffix: string     # telemetry is served at telemetry.<domain_suffix>
+	--timeout: string = "90s"
+] {
+	print "Ensuring observability stack (VictoriaMetrics + Jaeger + Vector)..."
+	render-observability $domain_suffix | kubectl apply -f -
 
 	print "Waiting for observability deployments..."
 	kubectl rollout status deployment/vmsingle -n observability $"--timeout=($timeout)"
@@ -926,6 +931,199 @@ def run-wall-probes [app: string, namespace: string, image: record, probes: list
 	print $"The airlock's wall holds: ($found | each {|p| {($p.as): $p.result.last} } | reduce -f {} {|r, acc| $acc | merge $r } | to json --raw)"
 }
 
+# The operators, Envoy class and observability stack are shared by every app on a
+# cluster, so a release records what it installed in a ConfigMap of the cluster
+# and the next one installs again only if its own entries differ. Without that,
+# every release rewrites components other apps are running on, an app pinned to a
+# different pronto switches their versions silently, and two releases at once
+# race on the same CRDs and Deployments.
+const operators_namespace = "pronto-system"
+const operators_record = "pronto-operators"
+const operators_lock = "pronto-operators-lock"
+
+# What an install is made of, in a form that does not depend on list order.
+export def operators-snapshot [entries: list, observability: string]: nothing -> record {
+	let normalized = ($entries | each {|e|
+		{
+			name: $e.name
+			url: $e.url
+			checksum: $e.checksum
+			kind: ($e.kind? | default "")
+			set: ($e.set? | default [] | sort)
+		}
+	} | sort-by name)
+	let observability_hash = ($observability | hash sha256)
+	{
+		hash: ({operators: $normalized, observability: $observability_hash} | to json --raw | hash sha256)
+		observability: $observability_hash
+		entries: $normalized
+	}
+}
+
+# What differs between two snapshots, one line each, old -> new.
+export def operators-changes [old: record, new: record]: nothing -> list<string> {
+	let old_by = ($old.entries | reduce -f {} {|e, acc| $acc | insert $e.name $e })
+	let new_by = ($new.entries | reduce -f {} {|e, acc| $acc | insert $e.name $e })
+	let shown = {|v| if ($v | describe | str starts-with "list") { $v | to json --raw } else { $v | into string } }
+	let names = ($old.entries.name | append $new.entries.name | uniq)
+	let lines = ($names | each {|n|
+		if $n not-in $old_by { [$"($n): added ($new_by | get $n | get url)"] } else if $n not-in $new_by { [$"($n): removed"] } else {
+			let o = ($old_by | get $n)
+			let w = ($new_by | get $n)
+			[url checksum kind set] | where {|f| ($o | get $f) != ($w | get $f) } | each {|f| $"($n): ($f) (do $shown ($o | get $f)) -> (do $shown ($w | get $f))" }
+		}
+	} | flatten)
+	if $old.observability != $new.observability {
+		$lines | append "observability: manifests changed"
+	} else { $lines }
+}
+
+# What a release does about the shared components. `mode` is default,
+# refuse-change (a shared cluster that must keep the versions it has) or reinstall.
+export def operators-plan [recorded: any, desired: record, mode: string]: nothing -> record {
+	if $mode not-in [default refuse-change reinstall] {
+		error make { msg: $"PRONTO_OPERATORS must be refuse-change or reinstall, not ($mode)" }
+	}
+	if $mode == "reinstall" {
+		return { action: install, why: "reinstall requested", changes: [] }
+	}
+	if $recorded == null {
+		return { action: install, why: "no record of an operator install on this cluster", changes: [] }
+	}
+	if $recorded.hash == $desired.hash {
+		return { action: skip, why: $"operators and observability already installed here \(($desired.hash | str substring 0..11)\)", changes: [] }
+	}
+	let changes = (operators-changes $recorded $desired)
+	if $mode == "refuse-change" {
+		{ action: refuse, why: "this release's operators differ from the ones installed on the cluster", changes: $changes }
+	} else {
+		{ action: install, why: "this release's operators differ from the ones installed on the cluster", changes: $changes }
+	}
+}
+
+# A named object, or null when the cluster has none.
+def kubectl-get-or-null [kind: string, name: string]: nothing -> any {
+	let res = (do { kubectl get $kind $name -n $operators_namespace -o json } | complete)
+	if $res.exit_code == 0 { return ($res.stdout | from json) }
+	if ($res.stderr | str contains "NotFound") { return null }
+	error make { msg: $"kubectl get ($kind) ($name) failed: ($res.stderr)" }
+}
+
+export def read-operators-record []: nothing -> any {
+	let cm = (kubectl-get-or-null configmap $operators_record)
+	if $cm == null { return null }
+	{
+		hash: $cm.data.hash
+		observability: $cm.data.observability
+		entries: ($cm.data.entries | from json)
+	}
+}
+
+export def write-operators-record [snapshot: record] {
+	{
+		apiVersion: "v1"
+		kind: "ConfigMap"
+		metadata: { name: $operators_record, namespace: $operators_namespace }
+		data: { hash: $snapshot.hash, observability: $snapshot.observability, entries: ($snapshot.entries | to json --raw) }
+	} | to json | kubectl apply -f -
+}
+
+# A lease nobody renews is free once its duration has passed.
+export def lease-expired [lease: record, now: datetime]: nothing -> bool {
+	let holder = ($lease.spec?.holderIdentity? | default "")
+	let renewed = ($lease.spec?.renewTime? | default ($lease.spec?.acquireTime? | default ""))
+	if ($holder | is-empty) or ($renewed | is-empty) { return true }
+	let seconds = ($lease.spec?.leaseDurationSeconds? | default 0)
+	(($renewed | into datetime) + ($seconds * 1sec)) < $now
+}
+
+def lease-body [holder: string, ttl: int, resource_version: string]: nothing -> record {
+	let now = (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%S%.6fZ")
+	let metadata = { name: $operators_lock, namespace: $operators_namespace }
+	{
+		apiVersion: "coordination.k8s.io/v1"
+		kind: "Lease"
+		metadata: (if ($resource_version | is-empty) { $metadata } else { $metadata | insert resourceVersion $resource_version })
+		spec: { holderIdentity: $holder, leaseDurationSeconds: $ttl, acquireTime: $now, renewTime: $now }
+	}
+}
+
+# Take the install lock: create the Lease, or replace one that has expired. Create
+# and replace both fail when another release got there first (the Lease exists, or
+# its resourceVersion moved), so one of two racing releases always loses and waits.
+export def acquire-operators-lock [holder: string, --ttl: int = 900, --wait: duration = 10min] {
+	let deadline = ((date now) + $wait)
+	mut announced = false
+	loop {
+		let current = (kubectl-get-or-null lease $operators_lock)
+		if $current == null or (lease-expired $current (date now)) {
+			let version = ($current | default {} | get -o metadata.resourceVersion | default "")
+			let body = (lease-body $holder $ttl $version | to json)
+			let res = if $current == null {
+				do { $body | kubectl create -f - } | complete
+			} else {
+				do { $body | kubectl replace -f - } | complete
+			}
+			if $res.exit_code == 0 { return }
+		}
+		if (date now) > $deadline {
+			error make { msg: $"Another release holds the operator install lock \(lease ($operators_namespace)/($operators_lock)\) and did not finish within ($wait)" }
+		}
+		if not $announced {
+			print $"Another release is installing the shared operators; waiting up to ($wait)..."
+			$announced = true
+		}
+		sleep 2sec
+	}
+}
+
+export def release-operators-lock [holder: string] {
+	let current = (kubectl-get-or-null lease $operators_lock)
+	if $current != null and ($current.spec?.holderIdentity? | default "") == $holder {
+		kubectl delete lease $operators_lock -n $operators_namespace --ignore-not-found
+	}
+}
+
+# Install the shared components unless the cluster's record says they are already
+# what this release carries. A skipped half has no whole to record, so it runs as
+# before, unrecorded.
+export def ensure-shared-components [
+	domain_suffix: string
+	--skip-operators
+	--skip-observability
+	--mode: string = "default"
+] {
+	if $skip_operators or $skip_observability {
+		if not $skip_operators { ensure-operators }
+		if not $skip_observability { ensure-observability $domain_suffix }
+		return
+	}
+	let desired = (operators-snapshot $OPERATORS (render-observability $domain_suffix))
+	kubectl create namespace $operators_namespace --dry-run=client -o yaml | kubectl apply -f -
+	let holder = $"release-(random uuid)"
+	acquire-operators-lock $holder
+	try {
+		let plan = (operators-plan (read-operators-record) $desired $mode)
+		match $plan.action {
+			"skip" => { print $"Skipping operators and observability: ($plan.why)." }
+			"refuse" => {
+				error make { msg: $"($plan.why); refusing because PRONTO_OPERATORS=refuse-change:\n($plan.changes | each {|c| '  ' + $c } | str join "\n")\nrun with --reinstall-operators to switch the cluster to this release's." }
+			}
+			_ => {
+				print $"Installing operators and observability: ($plan.why)."
+				for c in $plan.changes { print $"  ($c)" }
+				ensure-operators
+				ensure-observability $domain_suffix
+				write-operators-record $desired
+			}
+		}
+	} catch {|e|
+		release-operators-lock $holder
+		error make $e.raw
+	}
+	release-operators-lock $holder
+}
+
 # Main entrypoint for release@k8s
 export def main [
 	--snapshot               # Build and render only, do not deploy
@@ -934,6 +1132,8 @@ export def main [
 	--cluster-env (-e): string = "kind"  # Target cluster environment (kind, eks, aks, gke)
 	--skip-operators = false # Skip operator bootstrap
 	--skip-observability = false # Skip VictoriaMetrics/Jaeger/Vector bootstrap
+	--reinstall-operators    # Install operators and observability even if the cluster records this release's
+	--refuse-operator-change # Fail instead of switching the operators a shared cluster already has
 ] {
 	let app_info = (resolve-app $app)
 	let manifests = (render-manifests $app_info.cue_path $cluster_env)
@@ -1000,12 +1200,8 @@ export def main [
 		let kubeconfig = (mktemp -t kubeconfig.XXXXXX | str trim)
 		kubectl config view --minify --flatten --context $context | save -f $kubeconfig
 		$env.KUBECONFIG = $kubeconfig
-		if not $skip_operators {
-			ensure-operators
-		}
-		if not $skip_observability {
-			ensure-observability $target_env.domainSuffix
-		}
+		let mode = if $reinstall_operators { "reinstall" } else if $refuse_operator_change { "refuse-change" } else { $env.PRONTO_OPERATORS? | default "default" }
+		ensure-shared-components $target_env.domainSuffix --skip-operators=$skip_operators --skip-observability=$skip_observability --mode $mode
 	}
 
 

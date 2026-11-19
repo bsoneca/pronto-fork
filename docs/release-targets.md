@@ -1083,6 +1083,19 @@ holds only Secret references and a digest that rolls auth when secrets change.
 Client secret values never enter the rendered workload manifests or temporary
 release metadata.
 
+### Shared operators on k8s
+
+A kind cluster is shared by every app released to it, so `release@k8s` does
+not reinstall its operators (Gateway API, Envoy Gateway, CloudNativePG,
+External Secrets, Dapr) and observability stack each time. It records a digest
+of what it installed in the cluster's `pronto-system/pronto-operators`
+ConfigMap and installs again only when the release's digest differs, printing
+the old -> new changes. `PRONTO_OPERATORS=refuse-change` (or
+`--refuse-operator-change`) fails instead of changing them, and
+`--reinstall-operators` forces the install. A Lease serializes concurrent
+installs. [`k8s/README.md`](../k8s/README.md#installed-once-per-cluster) has
+the decision table.
+
 ### Effects on k8s
 
 A program that declares effects gets on k8s what compose gives it, from

@@ -100,6 +100,20 @@ Manifests are cached in `~/.cache/sayt/k8s/operators` and applied via `kubectl a
 | **External Secrets (ESO)** | `v0.10.5` (Helm chart) | `5cf78ad9...` | Syncs SOPS / external stores into native Kubernetes Secrets |
 | **Dapr** | `v1.14.4` (Helm chart) | `97f64b80...` | Distributed application runtime with native Kubernetes secret store |
 
+### Installed once per cluster
+
+The operators, the Envoy GatewayClass and the observability stack are shared by every app on a cluster, so `release@k8s` installs them only when the cluster does not already hold what the release carries. After a successful install it records a digest of the `OPERATORS` entries (name, URL, checksum, helm `--set` values) and of the rendered observability manifests, with the entries themselves, in the ConfigMap `pronto-system/pronto-operators`. The next release compares its own digest with the record:
+
+| Cluster record | Release |
+| :--- | :--- |
+| none (a fresh cluster) | installs everything, then records it |
+| same digest | skips the install and says so in one line |
+| different entries | installs, printing each change old -> new (`cnpg: url ... -> ...`) |
+| different entries, `PRONTO_OPERATORS=refuse-change` or `--refuse-operator-change` | fails with the same list and changes nothing |
+| any, `--reinstall-operators` or `PRONTO_OPERATORS=reinstall` | installs |
+
+Use `refuse-change` on a cluster several apps share, so an app pinned to another pronto cannot switch the operators under the others. The check and the install run under a Lease (`pronto-system/pronto-operators-lock`, 15 minute expiry) so two releases never install at once; one that finds it held waits up to 10 minutes, then compares again. `--skip-operators` and `--skip-observability` still skip their half and record nothing.
+
 ---
 
 ## 7. Observability Architecture (Option B)
@@ -169,6 +183,11 @@ sayt -d /path/to/app release@k8s --cluster-env aks --dry-run
 
 # 4. Skip operator reconciliation on repeated dev iterations
 sayt -d /path/to/app release@k8s --skip-operators
+
+# 5. Operators and observability are installed once per cluster (see section 6);
+#    force the install, or refuse to change what a shared cluster has
+sayt -d /path/to/app release@k8s --reinstall-operators
+PRONTO_OPERATORS=refuse-change sayt -d /path/to/app release@k8s
 ```
 
 ### Direct Script Usage
