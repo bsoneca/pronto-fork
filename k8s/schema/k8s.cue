@@ -278,6 +278,17 @@ import (
 				]])
 			}).out
 		},
+		// The seed's content restated (#Entity.seedRestated), after migrate has
+		// brought every column the seed names: the database image's own step,
+		// one transaction, skipped while the seed's hash is the recorded one.
+		if release.type == "pronto" && release.restate != _|_ {
+			(schemaJob & {
+				component: "restate"
+				svc:       "database"
+				env:       schemaEnv
+				command: ["psql", "-v", "ON_ERROR_STOP=1", "-Xq", "-f", "/docker-entrypoint-initdb.d/901_seed_restate.sql"]
+			}).out
+		},
 	]
 
 	let prontoDatabaseServiceObj = [

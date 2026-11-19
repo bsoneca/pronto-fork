@@ -120,7 +120,7 @@ Every service runs the image the app's own compose project builds (database, mig
 
 An app that declares effects also runs compose's airlock, its daprd and the bridges named for k8s, with compose's networks as NetworkPolicies and the ledger's upgrade as a Job before migrate ([effects on k8s](../docs/release-targets.md#effects-on-k8s)).
 
-The schema is built as compose builds it, by two Jobs on the app's images: `<app>-initdb` runs the database image's `/docker-entrypoint-initdb.d` once, on a fresh database (a database comment marks it built), and `<app>-migrate`, where the app has pgroll migrations, carries the schema forward on every release. The services are applied after both, so none starts on a missing schema.
+The schema is built as compose builds it, by two Jobs on the app's images: `<app>-initdb` runs the database image's `/docker-entrypoint-initdb.d` once, on a fresh database (a database comment marks it built), and `<app>-migrate`, where the app has pgroll migrations, carries the schema forward on every release. The services are applied after both, so none starts on a missing schema. Where an entity declares `seedRestated`, a third, `<app>-restate`, runs the database image's `901_seed_restate.sql` after migrate: the declared tables are emptied and refilled from the seed in one transaction, once per change of their rows ([seed rows](../docs/schema-change-admission.md#seed-rows-on-a-live-database)).
 
 ---
 

@@ -332,7 +332,7 @@ export def airlock-services [compose: record, facts: record]: nothing -> record 
 	# release's own Services may hold: its services', their sidecars' `-dapr`
 	# ones the injector makes, and the wall's `pronto-` ones; the database's
 	# CloudNativePG makes, which name the app, airlock.cue refuses.
-	let own = ($runtime_supported | append [database crud electric auth caddy render migrate initdb airlock airlock-mesh airlock-upgrade tsbifrost])
+	let own = ($runtime_supported | append [database crud electric auth caddy render migrate restate initdb airlock airlock-mesh airlock-upgrade tsbifrost])
 	let taken = ($bridges | where {|b| $b.container in $own or $b.container in ($own | each { $"($in)-dapr" }) or ($b.container | str starts-with "pronto-") } | get container | uniq)
 	if ($taken | is-not-empty) {
 		error make {msg: $"a bridge on k8s names container ($taken | str join ', '), which the release's own services name: rename the container"}
@@ -1045,6 +1045,8 @@ export def main [
 		{svc: $svc, ref: {tag: $tag, digest: $digest}}
 	} | reduce -f {} {|it, acc| $acc | insert $it.svc $it.ref })
 	# What compose gives the migrate service beyond the database it names.
+	# The database image carries 901_seed_restate.sql where a table is restated from the seed.
+	let has_restate = ($app_source_dir | path join services database migrations 901_seed_restate.sql | path exists)
 	let migrate = if $has_migrate {
 		{migrate: {env: (do { cd $app_source_dir; docker compose --profile "*" config --format json } | from json | get services.migrate.environment | reject DATABASE_URL)}}
 	} else { {} }
@@ -1076,7 +1078,7 @@ export def main [
 		}}
 	} else { {} }
 	let pushed_file = (mktemp -t pushed.XXXXXX.json | str trim)
-	{App: ({image: {pushed: $pushed}, auth: ($oidc | reject secretValues)} | merge $migrate | merge (if $trusted == null { {} } else { {trustedKeysDigest: $trusted.digest, trustedAudience: $trusted.audience} }) | merge $airlock_digests)} | to json | save -f $pushed_file
+	{App: ({image: {pushed: $pushed}, auth: ($oidc | reject secretValues)} | merge $migrate | merge (if $has_restate { {restate: true} } else { {} }) | merge (if $trusted == null { {} } else { {trustedKeysDigest: $trusted.digest, trustedAudience: $trusted.audience} }) | merge $airlock_digests)} | to json | save -f $pushed_file
 	let released = (render-manifests $app_info.cue_path $cluster_env --data $pushed_file)
 	rm $pushed_file
 
@@ -1127,7 +1129,7 @@ export def main [
 		sleep 3sec
 	}
 
-	for job in (["initdb"] | append (if $has_airlock { ["airlock-upgrade"] } else { [] }) | append (if $has_migrate { ["migrate"] } else { [] })) {
+	for job in (["initdb"] | append (if $has_airlock { ["airlock-upgrade"] } else { [] }) | append (if $has_migrate { ["migrate"] } else { [] }) | append (if $has_restate { ["restate"] } else { [] })) {
 		run-job ($jobs_yaml | where {|d| $d =~ $"\(?m\)^  name: ($app_info.name)-($job)\\s*$" } | first) $"($app_info.name)-($job)" $target_ns
 	}
 

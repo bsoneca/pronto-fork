@@ -71,6 +71,9 @@ package schema
 	// environment compose gives it beyond its DATABASE_URL (REQUIRED_TABLES),
 	// filled by the release from that project.
 	migrate?: env: [string]: string
+	// Present where the program restates a table from its seed (the database
+	// image holds 901_seed_restate.sql): the release runs it after migrate.
+	restate?: true
 
 	auth: {
 		rpId?:   string

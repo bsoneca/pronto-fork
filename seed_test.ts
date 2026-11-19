@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
-import { oneHome, parseHeld, type SeedData, seedKey, seedSql, vetHeld } from "./seed.ts";
+import { oneHome, parseHeld, restateSql, type SeedData, seedKey, seedSql, vetHeld } from "./seed.ts";
+import { cue, emitFiles, paymentProgram } from "./effects-fixtures.ts";
 
 const team: SeedData["entities"][number] = {
   name: "Team",
@@ -120,4 +121,99 @@ code: pronto.#App & {
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+const content: SeedData = {
+  entities: [
+    { name: "Lesson", table: "lesson", restate: true, columns: [{ name: "id", type: "uuid" }, { name: "title", type: "string" }], rows: [{ id: "a", title: "One" }, { id: "b", title: "O'Two" }] },
+    { name: "Team", table: "team", columns: [{ name: "id", type: "uuid" }], rows: [{ id: "t" }] },
+  ],
+};
+const hashOf = (sql: string) => sql.match(/sha256 = '([0-9a-f]{64})'/)![1];
+
+Deno.test("a declared table is restated in one DO block, keyed by the hash of its rows; an undeclared one is left out", () => {
+  const sql = restateSql(content, {});
+  assert.match(sql, /TRUNCATE "lesson";/);
+  assert.doesNotMatch(sql, /"team"/);
+  assert.match(sql, /INSERT INTO "lesson" \("id", "title"\) VALUES \('b', 'O''Two'\)/);
+  // Plain SQL: squawk and every runner read it, so no psql command.
+  assert.doesNotMatch(sql, /^\\/m);
+  assert.match(sql, /DO \$restate_[0-9a-f]{12}\$\nBEGIN\n/);
+  assert.match(sql, /ON CONFLICT \(id\) DO UPDATE SET sha256/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS pronto_seed\.restated/);
+  assert.doesNotMatch(sql, /public\./);
+  // The hash moves with the rows and with nothing else.
+  const other = restateSql({ entities: [{ ...content.entities[0], rows: [{ id: "a", title: "One" }] }, content.entities[1]] }, {});
+  assert.notEqual(hashOf(sql), hashOf(other));
+  const team = restateSql({ entities: [content.entities[0], { ...content.entities[1], rows: [{ id: "u" }] }] }, {});
+  assert.equal(team, sql);
+  // A newly declared table restates even when it holds no rows.
+  const empty = { ...content.entities[1], name: "Empty", table: "empty", restate: true, rows: [] };
+  assert.notEqual(hashOf(restateSql({ entities: [content.entities[0], empty] }, {})), hashOf(sql));
+  // The first-creation seed is unchanged by the declaration.
+  assert.equal(seedSql(content, {}).split("\n").length, 4);
+  assert.throws(() => restateSql({ entities: [content.entities[1]] }, {}), /no entity declares/);
+});
+
+Deno.test("a restated table's parent is loaded before it", () => {
+  const parent = { name: "Unit", table: "unit", restate: true, columns: [{ name: "id", type: "uuid" }], rows: [{ id: "u" }] };
+  const child = { name: "Lesson", table: "lesson", restate: true, columns: [{ name: "id", type: "uuid" }, { name: "unit_id", type: "uuid", ref: "unit" }], rows: [{ id: "a", unit_id: "u" }] };
+  restateSql({ entities: [parent, child] }, {});
+  assert.throws(() => restateSql({ entities: [child, parent] }, {}), /Lesson\.unit_id references unit, which is restated after it/);
+});
+
+// The program emits 901 only for a declaration, and refuses it where something else writes the table.
+// The fixture imports pronto by its monorepo path; the module here is the mirror's.
+const here = (program: string) => program.replace("bonisoft.org/plugins/pronto", "github.com/bonisoft3/pronto");
+const note = (extra = "") => `Note: {table: "note", durability: "server", ${extra} seed: [{id: "06000000-0000-4000-8000-000000000001"}], fields: [{name: "id", type: "uuid", pk: true}]}`;
+const restated = (declare: boolean, entity = note(declare ? "seedRestated: true," : "")) => here(paymentProgram({ entity }));
+const SEED = "services/database/migrations/900_seed.sql";
+const RESTATE = "services/database/migrations/901_seed_restate.sql";
+const exportOut = (program: string) => cue(["export", "-", "-e", "out", "--out", "json"], program);
+
+Deno.test("a program emits the restate step only for a declared table", async () => {
+  const on = await emitFiles(restated(true));
+  const off = await emitFiles(restated(false));
+  assert.ok(RESTATE in on);
+  assert.ok(!(RESTATE in off));
+  assert.equal(on[RESTATE].data.entities.find((e: { name: string }) => e.name === "Note").restate, true);
+  // 900 carries the same rows; only the marker differs.
+  const strip = (d: { entities: Record<string, unknown>[] }) => d.entities.map(({ restate: _, ...e }) => e);
+  assert.deepEqual(strip(on[SEED].data), strip(off[SEED].data));
+  assert.equal(on[SEED].text, off[SEED].text);
+});
+
+const refused = async (program: string, message: RegExp) => {
+  const res = await exportOut(program);
+  assert.equal(res.success, false);
+  assert.match(res.stderr, message);
+};
+
+Deno.test("a restated table another writer makes is refused", async () => {
+  const form = restated(true).replace("forms: []", `forms: [{id: "new-note", entity: "Note", action: "create", fields: []}]`);
+  await refused(form, /entity Note is restated from its seed, but form board also writes it/);
+  assert.equal((await exportOut(restated(true))).success, true);
+});
+
+Deno.test("a restated table that an unrestated one references is refused; a restated one may", async () => {
+  const child = (restate: boolean) => `${note("seedRestated: true,")}\n      Page: {table: "page", durability: "server", ${restate ? "seedRestated: true," : ""} fields: [{name: "id", type: "uuid", pk: true}, {name: "note_id", type: "uuid", ref: "note"}]}`;
+  await refused(restated(true, child(false)), /entity Note is restated from its seed, but entity Page field note_id references it/);
+  assert.equal((await exportOut(restated(true, child(true)))).success, true);
+});
+
+Deno.test("a restated table a schedule emits into, a pipeline reads, or a client may write is refused", async () => {
+  const tick = `Note: {table: "note", durability: "server", seedRestated: true, fields: list.Concat([pronto.#tickFields, [{name: "status", type: "text"}]])}\n      Done: {table: "done", durability: "live", fields: [{name: "id", type: "uuid", pk: true}]}`;
+  await refused(
+    restated(true, tick).replace('import "bonisoft.org/plugins/pronto"', 'import "list"\nimport "bonisoft.org/plugins/pronto"').replace('import "github.com/bonisoft3/pronto"', 'import "list"\nimport pronto "github.com/bonisoft3/pronto"') +
+      `\napp: state: schedules: tick: {cron: "0 3 * * *", emits: {entity: "Note", values: {}}, done: {entity: "Done", filter: "id=eq.{id}"}}\n`,
+    /entity Note is restated from its seed, but schedule tick emits into it/,
+  );
+  await refused(
+    restated(true) + `\napp: state: pipelines: copy: {from: "Note", to: "Payment", key: "id"}\n`,
+    /entity Note is restated from its seed, but pipeline copy reads it/,
+  );
+  await refused(restated(true, note(`seedRestated: true, access: {scope: "private", owner: "id"},`)), /its private access lets a client write it/);
+  await refused(restated(true, note(`seedRestated: true, access: {scope: "public", write: true},`)), /its public access lets a client write it/);
+  assert.equal((await exportOut(restated(true, note(`seedRestated: true, access: {scope: "public"},`)))).success, true);
+  assert.equal((await exportOut(restated(true, note(`seedRestated: true, access: {scope: "internal"},`)))).success, true);
 });

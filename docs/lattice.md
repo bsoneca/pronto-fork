@@ -117,6 +117,7 @@ replay and a `put` be stated twice.
 |---|---|---|
 | durability × access | `#Entity`: `access` on `tab` or `device` is `_\|_`; a cluster rung takes `#Access` | yes, `cue vet` |
 | durability × seed, partial unique | `#Entity`: `device` refuses `seed`; a unique's `where` only below the cluster | yes, `cue vet` |
+| durability × seed restate | `#Entity`: only a `server` entity takes `seedRestated`; `#App._seedRestateViolations`: no writer but the seed | yes, `cue vet` |
 | durability × validation edge | `validations.ts`: a cluster entity's edge to a `tab` or `device` one | yes, when `derive.ts` runs |
 | durability × schedule | `_scheduleShape`: `emits` is `server`, `done` is another, `live` entity | yes, `cue vet` |
 | durability × secret field | `#App._secretViolations`: only a `server` entity holds one, and no derivation, index, input or key reads it ([[decisions/2026-11-16-secret-fields\|secret fields]]) | yes, `cue vet` |

@@ -38,7 +38,7 @@ import (
 )
 
 #File: {
-	format: "sql" | "cortex-sql" | "local-handler" | "mecha-reducer-sql" | "mecha-reducer-local" | "function-sql" | "function-local" | "type-sql" | "carrier-sql" | "seed-sql" | "proto" | "yaml" | "json" | "caddyfile" | "html" | "css" | "cue" | "bloblang" | "jessie" | "js" | "text" | "toml" | "document"
+	format: "sql" | "cortex-sql" | "local-handler" | "mecha-reducer-sql" | "mecha-reducer-local" | "function-sql" | "function-local" | "type-sql" | "carrier-sql" | "seed-sql" | "seed-restate-sql" | "proto" | "yaml" | "json" | "caddyfile" | "html" | "css" | "cue" | "bloblang" | "jessie" | "js" | "text" | "toml" | "document"
 	text?:  string // raw formats, writer-materialized
 	data?:  _      // structured formats, writer-serialized
 	src?:   string // assembly file authored in place; writer verifies presence
@@ -426,11 +426,13 @@ _sqlType: {
 	_held: S.code.state.seed != _|_
 	out: {
 		if S._held {src: S.code.state.seed.src}
-		entities: [for _, e in S.code.state.entities if e.server if S._held || len(e.seed) > 0 {
+		entities: [for _, e in S.code.state.entities if e.server if S._held || len(e.seed) > 0 || e.seedRestated != _|_ {
 			name:  e.name
 			table: e.table
+			if e.seedRestated != _|_ {restate: true}
 			columns: [for f in e.fields {
 				name: f.name
+				if f.ref != _|_ {ref: f.ref}
 				if #Carrier[f.type] != _|_ {
 					type: f.type
 					if #Carrier[f.type].column == "domain" {
@@ -2939,7 +2941,8 @@ _traceHeader: include_patterns: ["^traceparent$"]
 	// A later entity's validations would rewrite 009_validations.sql.
 	_laterUnvalidated: [] & [for e in M.later if len([for n, _ in e.validations {n}]) > 0 {e.name}]
 	seeded:            [for _, e in M.code.state.entities if len(e.seed) > 0 if e.server {e}]
-	_seedFile:         len(M.seeded) > 0 || M.code.state.seed != _|_
+	restated:          [for _, e in M.code.state.entities if e.seedRestated != _|_ {e}]
+	_seedFile:         len(M.seeded) > 0 || len(M.restated) > 0 || M.code.state.seed != _|_
 	accessed:          [for _, e in M._base if e.access != _|_ {e}]
 	updateOnly:        [for e in M.accessed if e.access.scope == "public" if e.access["write"] != _|_ if e.access.write == "update" {e}]
 	machines:          [if M.code.state.mecha.rows != _|_ {[for _, m in M.code.state.mecha.rows for en, e in M._base if en == m.entity || e.table == m.entity if e.server {m}]}, []][0]
@@ -2975,6 +2978,7 @@ _traceHeader: include_patterns: ["^traceparent$"]
 		} if len([for r in M.raw if r.name == migration {r}]) == 0 {"services/database/migrations/\(migration)"},
 		if len(M.code.state.schedules) > 0 {"services/database/migrations/801_schedule_seed.sql"},
 		if M._seedFile {"services/database/migrations/900_seed.sql"},
+		if len(M.restated) > 0 {"services/database/migrations/901_seed_restate.sql"},
 	]
 }
 
@@ -5503,6 +5507,12 @@ _pgrollDir: "services/database/pgroll"
 				"services/database/migrations/900_seed.sql": {
 					format: "seed-sql"
 					data:   (#seedData & {code: E.code}).out
+				}
+				if len(E._appMigrations.restated) > 0 {
+					"services/database/migrations/901_seed_restate.sql": {
+						format: "seed-restate-sql"
+						data:   (#seedData & {code: E.code}).out
+					}
 				}
 			}
 

@@ -323,6 +323,36 @@ Rejected orderings:
   carries; its text is the authority for what the database ran, and a
   release whose text moved since is refused as any changed script is.
 
+### Seed rows on a live database
+
+`900_seed.sql` runs once, when the database is created, and an applied script
+may never change, so a seed edit never reaches a live database by itself. An
+entity declaring `seedRestated` opts its table out of that rule: the table's
+rows are content the seed owns, and `901_seed_restate.sql` (run by the k8s
+release's `restate` Job after `migrate`, so every column the seed names exists)
+truncates it and loads the seed in one transaction. The step is a plain-SQL
+`DO` block, so squawk reads it and any runner applies it. It records the
+sha256 of the sorted table names and rows in `pronto_seed.restated`, in a
+schema PostgREST does not serve and the API roles hold no USAGE on, so a
+client cannot rewrite the hash a release skips on. It is not a migration and
+changes no schema.
+
+What the declaration costs, and so what is refused:
+
+- Rows written by anything else are erased, so it is refused on a table with
+  another writer in `writers`, a schedule that emits into it, or an `access`
+  that lets a client write it. A drain's function, a hatch or raise inside a
+  machine, and (where auth is off) any table with no `access`, which anon
+  writes, are not seen by the refusal and are the author's to keep off it.
+- `TRUNCATE` fails on a table another one references, so an unrestated entity's
+  `ref` to it is refused; restated tables truncate together, parent first.
+- `TRUNCATE` is a change in the change feed. Electric resyncs the table's
+  shapes; a pipeline reading it does not handle one, so that is refused, and a
+  computation's reads are not seen.
+- It takes `ACCESS EXCLUSIVE` locks until commit: readers and writers of the
+  restated tables wait, bounded by the migration's `lock_timeout` to get them
+  and by `statement_timeout` (10 minutes here) to run.
+
 ### Retyping a column from a domain to its base type
 
 The domain/base split ([types](types-and-identity.md#a-domain-only-where-the-output-needs-one))

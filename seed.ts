@@ -5,6 +5,7 @@
 // it on every evaluation; they are judged here instead, by `cue vet` against
 // the program's own #Seed, and only when what the judgement depends on moved.
 import { checkTypeSeeds, type TypeEntity } from "./type-check.ts";
+import { createHash } from "node:crypto";
 import { sha256Hex } from "./facts.ts";
 
 export type Row = Record<string, unknown>;
@@ -13,7 +14,7 @@ export type Held = Record<string, Row[]>;
 /** The emission's `seed-sql` entry (emit.cue #seedData). */
 export type SeedData = {
   src?: string;
-  entities: { name: string; table: string; columns: { name: string; type?: string; from?: string }[]; rows: Row[] }[];
+  entities: { name: string; table: string; restate?: boolean; columns: { name: string; type?: string; from?: string; ref?: string }[]; rows: Row[] }[];
 };
 
 /** A seed file, as {"<Entity>": [row, ...]}; anything else is refused. */
@@ -58,7 +59,7 @@ function literal(where: string, v: unknown): string {
 }
 
 /** 900_seed.sql's body: per entity in program order, its rows in order. */
-export function seedSql(data: SeedData, held: Held): string {
+export function seedSql(data: SeedData, held: Held, only: (e: SeedData["entities"][number]) => boolean = () => true): string {
   const src = data.src ?? "";
   const known = new Set(data.entities.map((e) => e.name));
   for (const entity of Object.keys(held)) {
@@ -66,7 +67,7 @@ export function seedSql(data: SeedData, held: Held): string {
   }
   oneHome(src, Object.fromEntries(data.entities.map((e) => [e.name, { seed: e.rows }])), held);
   const blocks: string[] = [];
-  for (const e of data.entities) {
+  for (const e of data.entities.filter(only)) {
     const rows = e.rows.length > 0 ? e.rows : held[e.name] ?? [];
     if (rows.length === 0) continue;
     const columns = new Map(e.columns.map((c) => [c.name, c]));
@@ -95,6 +96,58 @@ export function seedSql(data: SeedData, held: Held): string {
     }).join("\n"));
   }
   return blocks.join("\n") + "\n";
+}
+
+/** Where the ledger lives: a schema PostgREST does not serve and the API roles
+ * hold no USAGE on, so no client can rewrite the hash a release skips on. */
+const LEDGER = "pronto_seed.restated";
+
+/** 901_seed_restate.sql's body, plain SQL (no psql commands, so squawk reads it
+ * and any runner applies it): the tables whose entity declares `seedRestated`,
+ * emptied and refilled from the seed in one transaction (the migration's own),
+ * unless the ledger holds the hash of exactly this content. The hash covers the
+ * sorted declared table names and their rows as rendered, so a row changed,
+ * added or dropped, or a table newly declared (even an empty one), restates;
+ * nothing else does. TRUNCATE has no CASCADE, so a table an unrestated one
+ * references is refused (schema.cue), and a restated one's parent is loaded
+ * first. It takes ACCESS EXCLUSIVE locks until commit, bounded by the
+ * prologue's lock_timeout to get them and by statement_timeout to run. */
+export function restateSql(data: SeedData, held: Held): string {
+  const declared = data.entities.filter((e) => e.restate);
+  if (declared.length === 0) throw new Error("no entity declares seedRestated");
+  const tableOf = new Map(declared.map((e, i) => [e.table, i]));
+  for (const [i, e] of declared.entries()) {
+    for (const c of e.columns) {
+      const parent = c.ref === undefined ? undefined : tableOf.get(c.ref);
+      if (parent !== undefined && parent > i) {
+        throw new Error(`${e.name}.${c.name} references ${c.ref}, which is restated after it: declare ${c.ref}'s entity before ${e.name}`);
+      }
+    }
+  }
+  const rows = seedSql(data, held, (e) => e.restate === true);
+  // node:crypto, not facts.ts's sha256Hex: the writer renders synchronously.
+  const names = declared.map((e) => e.table).sort().join(",");
+  const sha = createHash("sha256").update(`${names}\n${rows}`).digest("hex");
+  const tag = `$restate_${sha.slice(0, 12)}$`;
+  if (rows.includes(tag)) throw new Error(`a seed row contains ${tag}`);
+  const tables = declared.map((e) => identifier(e.table)).join(", ");
+  return [
+    "CREATE SCHEMA IF NOT EXISTS pronto_seed;",
+    `CREATE TABLE IF NOT EXISTS ${LEDGER} (id boolean PRIMARY KEY DEFAULT true CHECK (id), sha256 text NOT NULL, restated_at timestamptz NOT NULL DEFAULT now());`,
+    "SET LOCAL statement_timeout = '10min';",
+    `DO ${tag}`,
+    "BEGIN",
+    `  IF EXISTS (SELECT 1 FROM ${LEDGER} WHERE sha256 = ${quote(sha)}) THEN`,
+    `    RAISE NOTICE 'seed content already restated (${sha})';`,
+    "    RETURN;",
+    "  END IF;",
+    `  TRUNCATE ${tables};`,
+    rows.trimEnd(),
+    `  INSERT INTO ${LEDGER} (sha256) VALUES (${quote(sha)}) ON CONFLICT (id) DO UPDATE SET sha256 = excluded.sha256, restated_at = now();`,
+    "END",
+    `${tag};`,
+    "",
+  ].join("\n");
 }
 
 /** The inputs a held seed's verdict depends on: its bytes, the entities that

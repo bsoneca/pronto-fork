@@ -26,7 +26,7 @@ import { projectSay, projectGates } from "./project-config.ts";
 import { generateTypeSQL } from "./type-sql.ts";
 import { generateProto, type ProtoEntity } from "./type-proto.ts";
 import { checkTypeSeeds, type TypeEntity } from "./type-check.ts";
-import { parseHeld, seedSql, type SeedData } from "./seed.ts";
+import { parseHeld, restateSql, seedSql, type SeedData } from "./seed.ts";
 import { type Program, renderIr, writeIrStylesheet } from "./ir-render.ts";
 import { declaredMachine } from "./mecha-spec.ts";
 import { compileMechaPorts } from "./mecha-ports.ts";
@@ -101,12 +101,12 @@ function render(rel: string, f: EmitFile): string {
     return sqlFile(rel, compileCortexSources(input.charts, input.entities));
   }
   if (f.format === "type-sql" || f.format === "carrier-sql") return sqlFile(rel, generateTypeSQL(f.data as { precision: number; scale: number }[]));
-  if (f.format === "seed-sql") {
+  if (f.format === "seed-sql" || f.format === "seed-restate-sql") {
     const data = f.data as SeedData;
     // Read, not judged: derive judged these bytes, and check-facts holds the
     // file to the hash it judged.
     const held = data.src === undefined ? {} : parseHeld(data.src, Deno.readTextFileSync(`${appDir}/${data.src}`));
-    return sqlFile(rel, seedSql(data, held));
+    return sqlFile(rel, f.format === "seed-sql" ? seedSql(data, held) : restateSql(data, held));
   }
   if (f.format === "proto") return generateProto(f.data as Record<string, ProtoEntity>);
   if (f.format === "json") return JSON.stringify(f.data, null, 2) + "\n"; // no comment syntax, no header

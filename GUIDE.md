@@ -228,6 +228,23 @@ state: seed: src: "seed.json" // {"<Entity>": [row, ...]}
   `schema.cue`, so a write that changed none of them does not judge again, and
   the file's `artifact` row makes `check-facts` refuse an edit the writer never
   saw.
+- A seed is written once, when the database is created, and never reconsidered:
+  a row a later release changes or drops does not reach a live database. An
+  entity whose rows are content the seed owns (a catalog, lessons) declares
+  `seedRestated: true`. The writer then also emits `901_seed_restate.sql`, and
+  the k8s release's `restate` Job runs it after `migrate`: one transaction (a
+  plain-SQL `DO` block) truncates the declared tables, loads their seed rows and
+  records the sha256 of the sorted table names and rows in
+  `pronto_seed.restated`, a schema the API roles cannot reach; a release whose
+  hash is the recorded one does nothing. It is refused on a table that anything
+  but the seed writes (a form, screen, chart, pipeline, computation, machine,
+  unit or hatch, as `writers` lists them, or a schedule that emits into it), a
+  pipeline reads, or an unrestated entity references (`ref`; a restated child
+  needs its parent declared first), and where `access` lets a client write it
+  (`private`, `folder`, `group`, or `public` with `write`). A drain's function, a
+  hatch or raise in a machine, a computation's reads, and a table with no
+  `access` where auth is off are not seen: keep them off it. Docker and gcp
+  releases do not run it; there the seed stays creation-only.
 - Write a row's constraints as its fields' types and `cel`. A constraint
   written on `seed` by hand is still applied, but the key does not cover it.
 

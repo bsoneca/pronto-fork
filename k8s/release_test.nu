@@ -245,6 +245,17 @@ def test_schema_jobs [] {
 	assert ($yaml | str contains "name: sample-migrate")
 	assert ($yaml | str contains "image: localhost:5001/sample-migrate:latest")
 	assert ($yaml | str contains "value: schedule")
+	# A program that restates a table from its seed (App.restate) runs the database image's step after migrate;
+	# one that does not, no such Job.
+	let rdata = (mktemp -t restate.XXXXXX.json | str trim)
+	{App: {migrate: {env: {REQUIRED_TABLES: "schedule"}}, restate: true}} | to json | save -f $rdata
+	let restated = (render-manifests $app.cue_path "kind" --data $rdata | from yaml)
+	rm $rdata
+	let job = ($restated | where kind == Job and metadata.name == sample-restate | first)
+	assert equal ($job.spec.template.spec.containers.0.image) "localhost:5001/sample-database:latest"
+	assert equal ($job.spec.template.spec.containers.0.command) [psql -v ON_ERROR_STOP=1 -Xq -f /docker-entrypoint-initdb.d/901_seed_restate.sql]
+	assert equal ($restated | where kind == Job | get metadata.name | where $it in [sample-migrate sample-restate]) [sample-migrate sample-restate]
+	assert not ($yaml | str contains "sample-restate")
 	# An app with no ledger migrations or reconciliation (no migrate service) runs no migrate Job.
 	assert not ((render-manifests (resolve-app ($fixtures_dir | path join "minimal")).cue_path "kind") | str contains "minimal-migrate")
 	assert not ($yaml | str contains "postInitApplicationSQLRefs")

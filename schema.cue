@@ -723,6 +723,18 @@ import (
 	// fresh tab collection is seeded at open. A row the reader deletes
 	// therefore stays deleted for as long as its store lives.
 	seed: [...{[string]: string | int | bool}]
+	// Opt-in: the rows of this table are content the seed owns, so a release
+	// states them again. The seed above is otherwise written once, when the
+	// database is created, and a row it later changes or drops never reaches
+	// a live one. A restated table is truncated and refilled from the seed in
+	// one transaction by the release's schema step (901_seed_restate.sql),
+	// skipped while the seed's hash is the recorded one. Refused (#App,
+	// _seedRestateRefusal) where anything but the seed writes the table: a
+	// restate would erase what that writer made.
+	seedRestated?: true
+	if !server {
+		seedRestated?: _|_
+	}
 	if durability == "device" {
 		// Not deferred — the tier is the wrong home for a stated row. A device
 		// collection outlives the page, so its birth and the terminal's boot
@@ -3223,6 +3235,36 @@ import (
 		}],
 	])
 	_secretRefusal: [if len(_secretViolations) == 0 {true}, _secretViolations[0]][0] & true
+
+	// A restated table is the seed's alone (#Entity.seedRestated): the emitter
+	// holds every writer of an entity (writers.cue), and the restate empties
+	// the table before it refills it.
+	// Also refused: a table another, unrestated entity references (005's
+	// REFERENCES makes TRUNCATE fail on it, in initdb as in every release); a
+	// schedule that emits into it; a pipeline that reads it, since TRUNCATE
+	// reaches the change feed as a truncate no pipeline handles; and an
+	// `access` that lets a client write it. Writers the program does not name
+	// (a drain's function, a hatch or raise inside a machine, a computation's
+	// reads, a table with no `access` where auth is off, which anon writes) are
+	// the author's to keep out (docs/schema-change-admission.md#seed-rows-on-a-live-database).
+	_seedRestateViolations: list.Concat([
+		[for en, e in A.state.entities if e.seedRestated != _|_ for w in e.writers {
+			"entity \(en) is restated from its seed, but \(w.kind) \(w.by) also writes it: a restate would erase what that writer made"
+		}],
+		[for en, e in A.state.entities if e.seedRestated != _|_ for on, o in A.state.entities if o.seedRestated == _|_ for f in o.fields if f.ref != _|_ if f.ref == e.table {
+			"entity \(en) is restated from its seed, but entity \(on) field \(f.name) references it: TRUNCATE fails on a referenced table; restate \(on) too, or drop the reference"
+		}],
+		[for en, e in A.state.entities if e.seedRestated != _|_ if A.state.schedules != _|_ for sn, s in A.state.schedules if s.emits.entity == en {
+			"entity \(en) is restated from its seed, but schedule \(sn) emits into it"
+		}],
+		[for en, e in A.state.entities if e.seedRestated != _|_ for pn, p in A.state.pipelines if p.from != _|_ if p.from == en {
+			"entity \(en) is restated from its seed, but pipeline \(pn) reads it: a pipeline does not handle the change feed's truncate"
+		}],
+		[for en, e in A.state.entities if e.seedRestated != _|_ if e.access != _|_ if e.access.scope != "internal" if e.access.scope != "public" || e.access["write"] != _|_ {
+			"entity \(en) is restated from its seed, but its \(e.access.scope) access lets a client write it"
+		}],
+	])
+	_seedRestateRefusal: [if len(_seedRestateViolations) == 0 {true}, _seedRestateViolations[0]][0] & true
 
 	_declaredBridges: [if A.state.bridges != _|_ {A.state.bridges}, {}][0]
 	_bridgeViolations: list.Concat([
