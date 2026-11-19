@@ -27,7 +27,7 @@ selected container and port, and Airlock's mesh waits for that container to star
 The role adds `airlock-out` and a dedicated `bridge-<name>-egress` network. It does
 not implicitly join the default network. Additional networks are explicit hatch
 capabilities. No database credential, host port publication or callback permission
-is granted by being a bridge. See [Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/airlock/README.md)
+is granted by being a bridge. See [Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/airlock/README.md)
 for the ledger and transport contract.
 
 A [read](decisions/2026-10-03-external-effects.md#reads), an effect that is an
@@ -63,11 +63,34 @@ simulator is that pattern as a declaration.
 ## Targets
 
 `targets` names the release targets the real container is deployed on:
-`docker`, where the appliance runs it as a process, and `cloudflare`, where
-the airlock's dispatcher Worker runs it as a Cloudflare Container. k8s runs
-the airlock and its daprd but deploys no bridge, and gcp's airlock has no daprd
-to reach one, so naming another is refused. On a target the bridge is not
-deployed on, its effects settle `failed` without a call.
+`docker`, where the appliance runs it as a process, `cloudflare`, where the
+airlock's dispatcher Worker runs it as a Cloudflare Container, and `k8s`,
+where it is a Deployment the airlock's daprd calls. gcp runs no daprd for the
+airlock, so naming it is refused. On a target the bridge is not deployed on,
+its effects settle `failed` without a call, unless an effect names another
+sink for that target (`sink.targets`): an origin, or a bridge deployed there,
+which is called instead.
+
+### k8s
+
+The k8s release bakes the image of the container's `<container>-appliance`
+target, which nothing starts in the stack, and runs it as a Deployment,
+`<app>-bridge-<container>`, of one replica behind a Service of the
+container's name, so the airlock's daprd dials it at
+`http://<container>:<port>` as compose's does; a container named as one of
+the release's own Services is refused. Its process is the image's own, as on
+cloudflare: a container that only pulls an image, or whose process,
+directory, user, files, mounts, privileges, devices or kernel settings only
+compose states (`compose.command`, `entrypoint`, `working_dir`, `user`,
+`volumes`, `cap_add`, `shm_size` and the like), is refused for k8s. The environment compose gives the
+container reaches it from the Secret `<app>-bridge-<container>`, which the
+release writes through stdin. Its NetworkPolicy,
+`<app>-bridge-<container>`, stands for compose's
+`bridge-<name>-egress`: only the daprd reaches it, on its port, and it reaches
+the cluster's resolver and addresses outside the cluster's
+([[release-targets#Effects on k8s]]). An effect whose k8s sink
+(`sink.targets.k8s`) is a bridge that does not name k8s is refused: the
+airlock settles as not deployed only an effect whose own bridge it is.
 
 ### Cloudflare
 
@@ -80,7 +103,7 @@ code: state: bridges: crawler: {
 }
 ```
 
-The dispatcher Worker ([mecha-edge](https://github.com/bonisoft3/mecha/blob/v0.25.0/packages/mecha-edge/README.md#effects))
+The dispatcher Worker ([mecha-edge](https://github.com/bonisoft3/mecha/blob/v0.25.1/packages/mecha-edge/README.md#effects))
 owns the container as a Durable Object class, `Bridge<Name>` bound as
 `BRIDGE_<NAME>` (`fetch-pages` is `BridgeFetchPages`, `BRIDGE_FETCH_PAGES`;
 `bundle/edge-bridges.ts` decides both, and refuses two bridges meeting in one
@@ -108,7 +131,7 @@ throws them instead, so the run errs as an origin's transport error does:
 counted, backed off, run again, `unknown` when the attempts run out. The
 effects' contract is otherwise unchanged: at least once, each run counted and
 settled by the object
-([Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/airlock/README.md#a-bridge-not-deployed)).
+([Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/airlock/README.md#a-bridge-not-deployed)).
 
 **Image.** The Dockerfile `wrangler deploy` builds is cut from the one bayt
 renders for the cluster target `<container>-appliance` (which nothing starts
@@ -182,7 +205,7 @@ Where a bridge does not run, the program still releases and its effects exist,
 but each fails at once: the airlock settles the claimed effect `failed` with
 `{bridge, target, reason: "not deployed"}` and calls neither handler nor sink,
 so the row takes its `onError` arrow, no run is spent and no dead letter is left
-([Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/airlock/README.md#a-bridge-not-deployed)).
+([Airlock](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/airlock/README.md#a-bridge-not-deployed)).
 That is the local stack for a bridge without a simulator, and every release
 target it does not name. The edge never dials a bridge's internal address: a
 bridge not on `cloudflare` is such an address there. An explicitly declared

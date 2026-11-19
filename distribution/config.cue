@@ -7,7 +7,7 @@ import (
 	"github.com/bonisoft3/pronto/resilience"
 )
 
-#Version:     "1.4.0"
+#Version:     "1.4.2"
 #SaytVersion: "0.49.1"
 
 // Checkout-only modules: the compiler's test fixtures read omnishell beside

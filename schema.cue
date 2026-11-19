@@ -25,8 +25,9 @@ import (
 #Target: "pages" | "cloudflare" | "docker" | "k8s" | "gcp" | "aws"
 #Tier:   "browser" | "edge" | "container" | "k8s" | "cloud"
 
-// A module pronto ships for an isolate hatch to name (emit.cue's _stockIsolates).
-#StockIsolate: or([for s, _ in _stockIsolates {s}])
+// An isolate pronto publishes, as an isolate hatch's `uses` names it:
+// `pronto/<name>`, one of emit.cue's _publishedIsolates.
+#PublishedIsolate: or([for s, _ in _publishedIsolates {"pronto/\(s)"}])
 
 // A path relative to the app directory, resolved by derive and by the
 // terminal's module loader. No scheme and no `..`: the source is read from the
@@ -1180,6 +1181,9 @@ import (
 	}
 }
 
+// The release targets a bridge may run on: gcp runs no daprd for the airlock.
+#BridgeTargets: ["docker", "cloudflare", "k8s"]
+
 // Level 4: what a machine's invoking state asks of the world outside the
 // cluster, performed by mecha's airlock against one sink and recorded in the
 // ledger (docs/decisions/2026-10-03-external-effects.md).
@@ -1223,8 +1227,6 @@ import (
 	// is read from the dispatcher's secret at each run, as the credential is,
 	// so one release reaches a vendor's sandbox from staging and its live API
 	// from production.
-	// k8s alone may name an in-cluster `service` instead (#InClusterSink;
-	// k8s/docs/index.md, "The airlock").
 	sink: {
 		origin?: mechaCluster.#Origin | #NamedOrigin
 		bridge?: string
@@ -1232,7 +1234,7 @@ import (
 		if ai != _|_ {tier: *"cheap" | mechaCluster.#AiBackendTier}
 		targets?: {
 			[("docker" | "cloudflare" | "gcp" | "aws")]: {origin?: mechaCluster.#Origin | #NamedOrigin, bridge?: string}
-			k8s?: {origin?: mechaCluster.#Origin | #NamedOrigin, bridge?: string, service?: #InClusterSink}
+			k8s?: {origin?: mechaCluster.#Origin | #NamedOrigin, bridge?: string}
 		}
 		credential?:  #Credential
 		contentType?: =~"^[a-z]+/[a-z0-9][a-z0-9.+-]*$" & !="application/json"
@@ -1335,21 +1337,6 @@ import (
 	endowments?: [...mechaCluster.#CageEndowment]
 }
 
-// A sink in the release's own Kubernetes cluster: a Service the airlock's daprd
-// calls at http://<name>.<namespace>.svc.cluster.local[:port][path], plain
-// HTTP whose encryption is the cluster's service mesh's. Its egress is opened
-// to `namespace` on `targetPort`, the pod's port, since a NetworkPolicy matches
-// the connection after the Service's address is translated to a pod's;
-// `podSelector`, the pods' labels, narrows it to them.
-#InClusterSink: {
-	name:       =~"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
-	namespace:  =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
-	port:       *80 | int & >=1 & <=65535
-	targetPort: *port | int & >=1 & <=65535
-	path?:      =~"^(/[A-Za-z0-9._~-]+)+$"
-	podSelector?: [string]: string
-}
-
 // A provider's word that a row may have changed: `POST /signal/<name>[/<id>]`.
 // Nothing in the body is believed and no signature is checked, since all a signal
 // can do is send the machine's `event` to the row `id` names, whose target state
@@ -1416,9 +1403,13 @@ import (
 #NamedOrigin: close({secret: #SecretName})
 
 // An environment variable an effect declares, never one the cluster's own
-// services read, nor a bridge's: BRIDGE_<NAME> binds a container on the
-// dispatcher Worker and BRIDGE_<NAME>_URL addresses one on the mesh.
-#SecretName: =~"^[A-Z][A-Z0-9_]*$" & !~"^(SERVICE_JWT|PGRST_JWT_SECRET|PGRST_JWKS|TRUSTED_JWKS|TRUSTED_AUDIENCE|POSTGRES_PASSWORD|POSTGRES_USER|POSTGRES_DB|ELECTRIC_SECRET|DATABASE_URL|MESH_URL|AIRLOCK_DIR|WAKE_URLS|AIRLOCK_SEAL_KEY|AIRLOCK_SEAL_KEY_PREVIOUS|AIRLOCK_SEAL_PUBLIC|AIRLOCK_SEAL_DEV)$" & !~"^BRIDGE_"
+// services read, whose compose environments a value of it would reach and a
+// release would write as theirs, the airlock's own among them (mecha's
+// #ReservedSecretName: its seal keys, AIRLOCK_*, and crud's key set and
+// audience, PGRST_JWKS and TRUSTED_*), nor a bridge's: BRIDGE_<NAME> binds a
+// container on the dispatcher Worker and BRIDGE_<NAME>_URL addresses one on
+// the mesh.
+#SecretName: =~"^[A-Z][A-Z0-9_]*$" & !~"^(SERVICE_JWT|PGRST_JWT_SECRET|PGRST_JWKS|TRUSTED_JWKS|TRUSTED_AUDIENCE|POSTGRES_PASSWORD|POSTGRES_USER|POSTGRES_DB|ELECTRIC_SECRET|ELECTRIC_PASSWORD|AUTHENTICATOR_PASSWORD|WAKE_URLS|RCLONE_[A-Z0-9_]*|REDIS_URL|CRUD_URL|MESH_EVENTS_URL|POKE_INTERVAL|DUCKSTREAM_ENGINE|COMPUTE_STATE_DIR|FELDERA_COMPILATION_PROFILE|CADDY_TLS_HOST_PORT|WEBAUTHN_ORIGIN|WEBAUTHN_RP_ID|AI_TARGET|AI_LOCAL_[A-Z0-9_]*|OIDC_[A-Z0-9_]*)$" & !~mechaCluster.#ReservedSecretName & !~"^BRIDGE_"
 
 #ActivepiecesAlias:      string & =~"^[a-zA-Z][a-zA-Z0-9_]*$"
 #ActivepiecesPath:       string & =~"^\\./pieces/[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$"
@@ -2013,10 +2004,11 @@ import (
 		// ([[docs/container-bridges#Targets]]). `docker` lowers a bridge as a
 		// process of its appliance, so it needs the bridge's `appliance` form;
 		// `cloudflare` ships the container's own image as a Cloudflare
-		// Container of the dispatcher Worker, so its container needs a
-		// Dockerfile. Naming another is refused here rather than failing every
-		// call there.
-		bridges?: [string]~(Name,_):     mechaCluster.#Bridge & {name: Name, targets: *[] | [...("docker" | "cloudflare")]}
+		// Container of the dispatcher Worker, and `k8s` as a Deployment behind
+		// the airlock's daprd, so on both its container needs a Dockerfile.
+		// gcp runs no daprd for the airlock: naming it is refused here rather
+		// than failing every call there.
+		bridges?: [string]~(Name,_):     mechaCluster.#Bridge & {name: Name, targets: *[] | [...or(#BridgeTargets)]}
 		duckstreams?: [string]~(Name,_): #DuckStreamPipeline & {name: Name}
 		// Seed rows held as data rather than stated: a JSON file beside the
 		// program, outside its package, keyed by entity name —
@@ -2282,13 +2274,14 @@ import (
 				entrypoint!: string & =~"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*\\.(ts|js|mjs)$" & !~"(^|/)\\.\\.?(/|$)"
 				files:       [string, ...string] & [...(string & =~"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$" & !~"(^|/)\\.\\.?(/|$)")]
 				memory:      *128 | int & >=16 & <=128
-				// A stock isolate is one of pronto's own modules, which pronto writes
+				// A published isolate is a module pronto ships, which pronto writes
 				// beside the app's other generated files and names here
-				// ([[docs/isolate-hatches#Stock isolates]]).
-				stock?: #StockIsolate
-				if H.stock != _|_ {
-					entrypoint: ".pronto/isolates/\(H.stock)/main.ts"
-					files:      [for f, _ in _stockIsolates[H.stock] {".pronto/isolates/\(H.stock)/\(f)"}]
+				// ([[docs/isolate-hatches#Published isolates]]).
+				uses?: #PublishedIsolate
+				if H.uses != _|_ {
+					let N = strings.TrimPrefix(H.uses, "pronto/")
+					entrypoint: ".pronto/isolates/\(N)/main.ts"
+					files:      [for f, _ in _publishedIsolates[N] {".pronto/isolates/\(N)/\(f)"}]
 				}
 			}
 
@@ -3448,14 +3441,22 @@ import (
 		for b in reached if _declaredBridges[b] == _|_ {
 			"effect \(n) reaches undeclared bridge: \(b)"
 		}],
+		// The airlock settles a bridge not deployed by the effect's own bridge
+		// (effects.json); one reached only through k8s's entry would be dialed
+		// there and never answer.
+		[for n, x in _effects if x.sink.targets != _|_ if x.sink.targets.k8s != _|_ if x.sink.targets.k8s.bridge != _|_
+		let b = x.sink.targets.k8s.bridge
+		if _declaredBridges[b] != _|_ if !list.Contains(_declaredBridges[b].targets, "k8s") if [if x.sink.bridge != _|_ {x.sink.bridge}, ""][0] != b {
+			"effect \(n) reaches bridge \(b) on k8s, which \(b) does not name in its targets"
+		}],
 		[for n, x in _effects
 		let defaults = len([if x.sink.origin != _|_ {1}]) + len([if x.sink.bridge != _|_ {1}]) + len([if x.sink.ai != _|_ {1}])
 		if defaults > 1 {
 			"effect \(n) names more than one of origin, bridge and ai as its default sink"
 		}],
 		[for n, x in _effects if x.sink.targets != _|_ for t, at in x.sink.targets
-		if len([if at.origin != _|_ {1}])+len([if at.bridge != _|_ {1}])+len([if at.service != _|_ {1}]) != 1 {
-			"effect \(n) names one of origin, bridge and service for target \(t)"
+		if len([if at.origin != _|_ {1}])+len([if at.bridge != _|_ {1}]) != 1 {
+			"effect \(n) names one of origin and bridge for target \(t)"
 		}],
 		[for n, x in _effects if x.sink.origin == _|_ if x.sink.bridge != _|_ || x.sink.ai != _|_ if x.sink.credential != _|_ || x.sink.contentType != _|_ {
 			"effect \(n) declares a credential or content type for a sink that is no origin"

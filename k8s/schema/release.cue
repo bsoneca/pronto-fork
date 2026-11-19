@@ -60,6 +60,15 @@ import (
 	// plugin, External Secrets, cert-manager), set by the release after each install: leader-elected,
 	// so two is n+1. On by default on metal, which runs the apps' production (PRONTO-361).
 	controllers: int & >=1 | *[if name == "metal" {2}, 1][0]
+	// Whether the network plugin is known to hold a new pod to the
+	// NetworkPolicies it has handled only after the pod starts, where
+	// Kubernetes asks it to before: the release's check of the airlock's
+	// wall refuses a cluster seen doing so unless this says it does, and the
+	// wall there is a development one.
+	policiesLate: *false | bool
+	// The addresses the kubelets hand pods as their resolver, where the
+	// release cannot read them from the nodes' kubelet configuration.
+	resolvers?: [...=~"^[0-9a-fA-F.:]+$"]
 }
 
 // #ReleaseSpec defines a Pronto application workload intent independent of the target cluster.
@@ -256,61 +265,56 @@ import (
 		databaseEnvironment: [..."DATABASE_URL" | "FELDERA_DATABASE_URL"]
 		serviceToken: bool
 		jwtSecret:    *false | bool
-		// The airlock's: the variables an effect reads as a secret, each from airlock.secrets.
-		secrets: *[] | [...=~"^[A-Z][A-Z0-9_]*$"]
 	}
-	// Where the airlock's secrets live (the app's effects' `secrets`), by variable: a Secret the
-	// operator keeps in the app's namespace, holding it under the variable's name. A variable the
-	// effects read and this does not name fails the release; a Secret not there fails it too, before
-	// anything rolls (check-airlock-secrets).
-	airlock: secrets: [=~"^[A-Z][A-Z0-9_]*$"]: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-	// Each effect's sink on this target, by effect (the app's .pronto/cluster.json k8sSinks; the
-	// release fills it): an https origin (mecha's #Origin), or a Service of this cluster over plain
-	// HTTP (pronto's #InClusterSink). They become the airlock's daprd's HTTPEndpoints and its only
-	// egress past DNS (runtime.cue).
-	airlock: sinks: [=~"^[a-z][a-z0-9-]*$"]: {
-		origin?: =~"^https://([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]([a-z0-9-]*[a-z0-9])?(:[0-9]{1,5})?$"
-		service?: {
-			name:       =~"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
-			namespace:  =~"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
-			port:       int & >=1 & <=65535
-			targetPort: int & >=1 & <=65535
-			path?:      =~"^(/[A-Za-z0-9._~-]+)+$"
-			podSelector?: [string]: string
+	// Present where the app's compose project runs the airlock, filled by the
+	// release from that project and the app's .pronto/cluster.json.
+	airlock?: {
+		// What compose hands the airlock beyond its database, origin, target
+		// and secrets (AIRLOCK_DIR, MESH_URL, BLOB_URL, PORT).
+		env: [string]: string
+		// The variables an effect declares, read from the Secret
+		// `<name>-airlock`, which the release writes from the release's own
+		// environment and never into a manifest; the digest of their values
+		// rolls the airlock when one changes.
+		secrets:      *[] | [...=~"^[A-Z][A-Z0-9_]*$"]
+		secretDigest: *"" | =~"^[0-9a-f]{64}$"
+		// An effect reads a secret field: the airlock opens it with
+		// AIRLOCK_SEAL_KEY, and AIRLOCK_SEAL_KEY_PREVIOUS through a rotation,
+		// which the release writes to the same Secret from its environment
+		// (mecha's services/airlock/seal.ts), and their digest is among the
+		// secrets'.
+		seal: *false | bool
+		// Each effect's endpoint on k8s, by effect: a base URL, or null where
+		// the effect names no sink this target reaches.
+		endpoints: [=~"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"]: string | null
+		// What compose hands the airlock's daprd that its resources read: the
+		// blob plane's address, where there is one.
+		meshEnv: [string]: string
+		// The bridge containers deployed here, by container: the port its
+		// bridges are served on, the bayt target that builds its image, and the
+		// digest of the environment compose gives it, which the release writes
+		// to the Secret `<name>-<container>`.
+		bridges: [=~"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"]: {
+			port:      int & >=1 & <=65535
+			build:     string
+			envDigest: *"" | =~"^[0-9a-f]{64}$"
 		}
-		_one: (len([if origin != _|_ {1}]) + len([if service != _|_ {1}])) & 1
+		// The cluster's own addresses as CIDRs, which the release reads from
+		// the cluster: its nodes', their pod ranges and the API server's. The
+		// world the daprd and the bridges reach excludes them, as it does the
+		// private ranges, since any may be public.
+		clusterAddresses: *[] | [...=~"^[0-9a-fA-F.:]+/[0-9]{1,3}$"]
+		// The resolvers the kubelets hand pods, as CIDRs, which the release
+		// reads from them: DNS goes to these and to the resolver's pods.
+		resolvers: *[] | [...=~"^[0-9a-fA-F.:]+/[0-9]{1,3}$"]
 	}
-	// An in-cluster sink is called over plain HTTP: the credential header and the body cross the
-	// network in cleartext unless a service mesh's sidecars encrypt them (networkPolicy.
-	// meshControlPlane). Without one, the release states it knows (`plaintext: true`).
-	airlock: plaintext: *false | bool
-	_inCluster: [for n, s in airlock.sinks if s.service != _|_ {n}]
-	_encrypted: [
-		if len(_inCluster) == 0 || networkPolicy.meshControlPlane != _|_ || airlock.plaintext {true},
-		"effects \(strings.Join(_inCluster, ", ")) reach in-cluster services over plain HTTP, their credential and body in cleartext: set networkPolicy.meshControlPlane where a service mesh's sidecars encrypt them, or airlock.plaintext: true",
-	][0] & true
-	// The egress to an in-cluster sink admits its namespace, or its podSelector's pods there. Never
-	// kube-system's nor the service mesh's control plane's; the app's own only through a podSelector.
-	_insiders: [for n, s in airlock.sinks if s.service != _|_
-		let pods = *s.service.podSelector | {}
-		if s.service.namespace == "kube-system" ||
-			(networkPolicy.meshControlPlane != _|_ && s.service.namespace == networkPolicy.meshControlPlane.namespace) ||
-			(s.service.namespace == ns && len(pods) == 0) {"\(n) (\(s.service.namespace))"}]
-	_outside: [
-		if len(_insiders) == 0 {true},
-		"effects \(strings.Join(_insiders, ", ")) reach a service in kube-system, the service mesh's control plane or, without a podSelector, the app's own namespace, which the airlock's daprd may not reach whole",
-	][0] & true
-	_unsecured: [for _, r in runtime for k in r.secrets if airlock.secrets[k] == _|_ {k}]
-	_secured: [
-		if len(_unsecured) == 0 {true},
-		"the app's effects read \(strings.Join(_unsecured, ", ")), which airlock.secrets does not name: name the Secret holding each",
-	][0] & true
-	// The airlock's network policies are its walls (runtime.cue): without them nothing keeps it to its
-	// daprd, nor its daprd to the declared sinks.
-	_walled: [
-		if runtime.airlock == _|_ || networkPolicy.enabled {true},
-		"the app declares effects and networkPolicy.enabled is false: the airlock runs only behind its network policies",
-	][0] & true
+	// The airlock's and each bridge's: a handler or a bridge holds a call's
+	// body and answer, an isolate up to 128 MiB of old space besides.
+	airlockResources: {
+		requests: {cpu: *"50m" | string, memory: *"128Mi" | string}
+		limits:   {cpu: *"1" | string, memory: *"1Gi" | string}
+	}
+
 	runtimeStorage: *"10Gi" | string
 	runtimeResources: {
 		requests: {cpu: *"500m" | string, memory: *"1Gi" | string}
@@ -493,14 +497,6 @@ import (
 		// the private ranges without one fails the release's vet, so a pull request adding one fails
 		// its gate.
 		internet: *"open" | "airlock"
-		// A service mesh whose sidecars run in the airlock's two pods (Istio's, say) needs its control
-		// plane, which the airlock's walls otherwise shut: each pod then also reaches `ports` in
-		// `namespace`. Absent, they reach no mesh. Sidecar mode with STRICT mTLS: an ambient mesh's node
-		// proxies would need other rules, and PERMISSIVE leaves an in-cluster sink's traffic in cleartext.
-		meshControlPlane?: {
-			namespace: =~"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" | *"istio-system"
-			ports: [int & >=1 & <=65535, ...int & >=1 & <=65535] | *[15012]
-		}
 	}
 
 	// Each egress entry that reaches past the private ranges with no `why`, under "airlock".

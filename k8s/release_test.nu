@@ -42,21 +42,12 @@ use release.nu [
 	crane-bin
 	auth-provider-secret
 	runtime-services
-	airlock-sinks
-	airlock-peers
-	airlock-peer-secrets
-	airlock-secrets
-	airlock-dev-seal-key
-	seal-key-bytes
-	airlock-stand-ins
-	airlock-shared-secrets
-	airlock-build-refusals
-	compose-raw
 	release-runtime
 	release-plan
 	airlock-refusals
 	compose-config
-	check-airlock-secrets
+	release-stand-ins
+	stale-airlock-cleanup
 	schema-copy-steps
 	release-tree
 	release-override
@@ -73,6 +64,25 @@ use release.nu [
 	sops-platform
 	sops-age-key
 	apply-environment-secrets
+	airlock-services
+	airlock-secrets
+	roles-reconciled
+	opaque-secret
+	cluster-address-blocks
+	wall-probe
+	wall-probes
+	before-probes
+	wall-target
+	wall-job-name
+	wall-key
+	selects
+	foreign-policies
+	pod-families
+	ready-nodes
+	wall-verdict
+	wall_probe_program
+	unranged-pod-addresses
+	release-airlock
 ]
 
 def main [] {
@@ -93,10 +103,15 @@ def run-tests [] {
 	test_electric_slots
 	test_native_runtime
 	test_release_plan
-	test_airlock_runtime
-	test_airlock_compose_reads
-	test_airlock_seal_key
-	test_airlock_in_cluster_sinks
+	test_airlock_refusal_guards
+	test_stale_airlock_cleanup
+	test_compose_stand_ins
+	test_airlock_manifests
+	test_airlock_wall
+	test_wall_probes
+	test_airlock_secrets
+	test_airlock_seal
+	test_airlock_refusals
 	test_resolve_app_by_path
 	test_resolve_app_nonexistent_fails
 	test_schema_jobs
@@ -539,6 +554,15 @@ def test_schema_jobs [] {
 	assert equal $authenticator.inRoles (open ((resolve-app ($fixtures_dir | path join "sample")).cue_path | path dirname | path join .pronto cluster.json) | get tokenRoles)
 	assert equal $authenticator.inRoles ["anon" "app_user" "service"]
 	assert equal $authenticator.inherit false
+	# The schema creates the roles it joins, never the bootstrap: one way for a
+	# fresh database and one that gains a declared role alike.
+	assert (($yaml | from yaml | where kind == "Cluster" | first | get spec.bootstrap.initdb.postInitSQL?) == null)
+	# authenticator is reconciled when the database holds it as the spec says,
+	# whatever an attempt made before the schema's roles stood could not do.
+	assert (roles-reconciled {byStatus: {reconciled: [electric authenticator]}, cannotReconcile: {authenticator: ["role \"reader\" does not exist"]}})
+	assert not (roles-reconciled {byStatus: {reconciled: [electric], pending-reconciliation: [authenticator]}})
+	assert not (roles-reconciled {byStatus: {reconciled: [electric authenticator], pending-reconciliation: [electric]}})
+	assert not (roles-reconciled {})
 	# Enforcing CNIs: OTLP/HTTP to Jaeger, and the instance manager's API server.
 	assert ($yaml | str contains "port: 4318")
 	assert ($yaml | str contains "port: 6443")
@@ -1752,388 +1776,97 @@ def test_release_plan [] {
 	assert not $metal.serviceToken
 }
 
-def test_airlock_runtime [] {
-	print "test the airlock and its daprd deploy as two pods behind two walls, their secrets from Secrets..."
-	let app = (resolve-app ($fixtures_dir | path join effects))
-	let data = (mktemp -t airlock.XXXXXX.json | str trim)
-	# Secrets are read before interpolation: a required one unset fails no compose read, and the
-	# operator's own value never reaches the manifests.
-	assert equal (airlock-secrets (do { cd $app.dir; docker compose config --no-interpolate --format json } | from json) | sort) [MAIL_KEY PAGER_KEY SINK_TOKEN]
-	let runtime = (with-env {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"} { release-runtime $app.dir gke })
-	assert equal ($runtime | columns | sort) [airlock airlock-mesh ticker]
-	assert equal ($runtime.airlock.secrets | sort) [MAIL_KEY PAGER_KEY SINK_TOKEN]
-	assert not ("SINK_TOKEN" in $runtime.airlock.env) "a secret is no plain variable"
-	assert equal (release-runtime $app.dir metal) {} "metal runs no compose service"
-	# An effect's secret the release does not place fails it, naming the variable.
-	let refused = (try { with-env {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"} { render-manifests $app.cue_path gke }; "" } catch {|e| $e.msg })
-	assert ($refused | str contains "MAIL_KEY, PAGER_KEY, SINK_TOKEN") $"an unplaced secret fails the release: ($refused)"
-	let secrets = {SINK_TOKEN: "effects-sinks", MAIL_KEY: "effects-mail", PAGER_KEY: "effects-pager"}
-	# Without its network policies the airlock has no walls: refused.
-	{App: {airlock: {secrets: $secrets}, networkPolicy: {enabled: false}}} | to json | save -f $data
-	let open = (try { with-env {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"} { render-manifests $app.cue_path gke --data $data }; "" } catch {|e| $e.msg })
-	assert ($open | str contains "runs only behind its network policies") $open
-	{App: {airlock: {secrets: $secrets}, networkPolicy: {internet: "airlock"}}} | to json | save -f $data
-	let rendered = (with-env {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"} { render-manifests $app.cue_path gke --data $data })
-	rm $data
-	assert not ($rendered | str contains "operator-value")
-	assert not ($rendered | str contains "operator-pager")
-	assert not ($rendered | str contains "dev-password")
-	let objs = ($rendered | from yaml)
-	let deployment = {|n| $objs | where kind == "Deployment" and metadata.name == $"effects-($n)" | first }
-	for n in [airlock airlock-mesh] {
-		let d = (do $deployment $n)
-		# airlock-mesh is a daprd of its own: an injected sidecar would be a second, unwalled one.
-		assert ($d.spec.template.metadata.annotations? | default {} | columns | where {|k| $k starts-with "dapr.io/" } | is-empty) $"($n) joins no mesh"
-		assert equal $d.spec.strategy.type "Recreate"
-	}
-	assert equal ((do $deployment ticker).spec.template.metadata.annotations."dapr.io/app-id") "ticker"
-	assert equal ($objs | where kind == "Service" and metadata.name in [airlock airlock-mesh] | each {|s| [$s.metadata.name $s.spec.ports.0.port] } | sort) [[airlock 9997] [airlock-mesh 3500]]
-	let vars = ((do $deployment airlock).spec.template.spec.containers.0.env)
-	for k in [SINK_TOKEN MAIL_KEY PAGER_KEY] {
-		let e = ($vars | where name == $k | first)
-		assert ($e.value? == null) $"($k) has no value of its own"
-		assert equal $e.valueFrom.secretKeyRef.key $k
-	}
-	assert equal ($vars | where name == SINK_TOKEN | first | get valueFrom.secretKeyRef.name) effects-sinks
-	assert equal ($vars | where name == DATABASE_URL | first | get value) 'postgresql://postgres:$(PGPASSWORD)@database:5432/effects?sslmode=disable' "the owner, as compose's"
-	assert equal ($vars | where name == MESH_URL | first | get value) "http://airlock-mesh:3500"
-	assert equal ($vars | where name == ORIGIN | first | get value) "https://effects.example.test" "the door's origin, not compose's"
-	let policy = {|n| $objs | where kind == "NetworkPolicy" and metadata.name == $"effects-($n)" | first | get spec }
-	let airlock = (do $policy airlock)
-	assert equal $airlock.ingress [{from: [{podSelector: {matchLabels: {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": ticker}}}], ports: [{port: 9997, protocol: TCP}]}] "only the ticker's wake"
-	assert equal ($airlock.egress | each {|r| [($r.to?.0?.podSelector?.matchLabels? | default {}) ($r.ports | get port | uniq)] }) [
-		[{"cnpg.io/cluster": effects-db} [5432]]
-		[{"app.kubernetes.io/name": effects, "app.kubernetes.io/component": airlock-mesh} [3500]]
-		[{"k8s-app": kube-dns} [53]]
-	] "the database, its daprd and DNS alone"
-	let mesh = (do $policy airlock-mesh)
-	assert equal $mesh.ingress [{from: [{podSelector: {matchLabels: {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": airlock}}}], ports: [{port: 3500, protocol: TCP}]}] "only the airlock"
-	let out = ($mesh.egress | where {|r| $r.to?.0?.ipBlock? != null } | first)
-	assert equal ($out.ports | get port | sort) [443 8443] "the sinks' ports, an origin's own included"
-	assert equal ($out.to.0.ipBlock.except | sort) ["10.0.0.0/8" "100.64.0.0/10" "169.254.0.0/16" "172.16.0.0/12" "192.168.0.0/16"] "nothing private, shared or link-local (a cloud's metadata server)"
-	# DNS goes to the cluster's resolvers alone, not to any address on 53.
-	# GKE's Cloud DNS answers at the metadata server's address, on 53 alone.
-	let dns = [{to: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": kube-system}}, podSelector: {matchLabels: {"k8s-app": kube-dns}}}, {ipBlock: {cidr: "169.254.20.10/32"}}, {ipBlock: {cidr: "169.254.169.254/32"}}], ports: [{port: 53, protocol: TCP}, {port: 53, protocol: UDP}]}]
-	assert equal ($airlock.egress | where {|r| $r.ports | any {|p| $p.port == 53 } }) $dns
-	assert equal ($mesh.egress | where {|r| $r.ports | any {|p| $p.port == 53 } }) $dns
-	assert equal ($mesh.egress | last) {to: [{podSelector: {matchLabels: {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": rclone-s3}}}], ports: [{port: 3900, protocol: TCP}]} "an answer's bytes to the blob plane"
-	assert equal ($mesh.egress | length) 3 "DNS, the sinks and the blob plane alone"
-	# Each effect's endpoint is this target's, mounted file by file over the image's compose ones.
-	let endpoints = ($objs | where kind == "ConfigMap" and metadata.name == "effects-airlock-endpoints" | first | get data)
-	assert equal ($endpoints | columns | sort) ["charge.yaml" "mail.yaml"]
-	assert equal ($endpoints."mail.yaml" | from yaml) {apiVersion: "dapr.io/v1alpha1", kind: HTTPEndpoint, metadata: {name: mail}, spec: {baseUrl: "https://mail.example.com:8443"}}
-	let meshPod = (do $deployment airlock-mesh).spec.template
-	assert equal ($meshPod.spec.containers.0.volumeMounts | each {|m| [$m.mountPath $m.subPath] } | sort) [["/dapr/airlock/charge.yaml" "charge.yaml"] ["/dapr/airlock/mail.yaml" "mail.yaml"]] "the wall, resiliency and blob binding stay the image's"
-	assert equal ($meshPod.spec.volumes) [{name: endpoints, configMap: {name: effects-airlock-endpoints}}]
-	assert ($meshPod.metadata.annotations."pronto.dev/config" | is-not-empty) "a changed endpoint rolls the daprd"
-	assert equal ($meshPod.spec.containers.0.env | where name == AIRLOCK_ORIGINS | get value) ["https://api.example.com https://mail.example.com:8443"]
-	assert equal ($airlock.egress | length) 3 "no service mesh's control plane unless named"
-	# Under internet "airlock" no other runtime service reaches the internet.
-	assert ($objs | where kind == "NetworkPolicy" and metadata.name == "effects-ticker" | first | get spec.egress | all {|r| $r.to?.0?.ipBlock? == null })
-	# Policies add up: one more selecting either pod would reopen its wall.
-	let walled = [airlock airlock-mesh]
-	let selects = {|p|
-		let sel = $p.spec.podSelector
-		let labels = ($sel.matchLabels? | default {})
-		let component = ($labels | get -o "app.kubernetes.io/component")
-		if "cnpg.io/cluster" in $labels { false
-		} else if $component != null { $component in $walled
-		} else if ($sel.matchExpressions? | is-not-empty) { $sel.matchExpressions | any {|e| $e.values | any {|v| $v in $walled } }
-		} else { true }
-	}
-	assert equal ($objs | where kind == "NetworkPolicy" | where {|p| do $selects $p } | get metadata.name | sort) [effects-airlock effects-airlock-mesh] "no other policy selects them"
-	# Where the walls would not stand, or real effects would run apart from the release, it is refused.
-	assert equal (airlock-refusals $runtime "" "") []
-	assert ((airlock-refusals $runtime "studio-ana" "") | first | str contains "NetworkPolicy") "a tenant's release drops every policy"
-	assert ((airlock-refusals $runtime "" "rc") | first | str contains "for real") "a preview would perform real effects"
-	assert equal (airlock-refusals {ticker: {}} "studio-ana" "rc") [] "an app without effects is not the airlock's to refuse"
-	# What the target cannot deploy still fails the release rather than dropping out of it.
-	# Compose is the docker target's: a simulator's bridge or the AI gateway there, with an in-cluster
-	# sink here, deploys neither, and nothing of compose's peers reaches the daprd's environment.
-	let k8s = {charge: {service: {name: ledger, namespace: payments, port: 80, targetPort: 80}}}
-	let simulated = (runtime-services {services: {airlock: {}, airlock-mesh: {environment: {AIRLOCK_ORIGINS: "", AIRLOCK_BRIDGES: "pdf tsbifrost", BRIDGE_PDF_URL: "http://pdf:8080", TSBIFROST_URL: "http://tsbifrost:8787", BLOBS_S3_URL: "http://rclone-s3:3900"}}, pdf: {}, tsbifrost: {}}} --sinks $k8s)
-	assert equal ($simulated | columns | sort) [airlock airlock-mesh]
-	assert equal $simulated.airlock-mesh.env {BLOBS_S3_URL: "http://rclone-s3:3900"}
-	let bridge = (try { airlock-sinks {k8sSinks: {charge: {bridge: pdf}}}; "" } catch {|e| $e.msg })
-	assert ($bridge | str contains "container bridges") $bridge
-	let gateway = (try { airlock-sinks {k8sSinks: {charge: {ai: text, tier: cheap}}}; "" } catch {|e| $e.msg })
-	assert ($gateway | str contains "tsbifrost") $gateway
-	let unsunk = (try { runtime-services {services: {airlock: {}, airlock-mesh: {}}}; "" } catch {|e| $e.msg })
-	assert ($unsunk | str contains "k8s sinks") $unsunk
-	let alone = (try { runtime-services {services: {airlock: {}}} --sinks $k8s; "" } catch {|e| $e.msg })
-	assert ($alone | str contains "together") $alone
+def test_airlock_refusal_guards [] {
+	print "test a tenant's release and a preview of an app with effects are refused, and an app without any is not..."
+	let tenant = (airlock-refusals true "game-1" "")
+	assert equal ($tenant | length) 1
+	assert ($tenant.0 | str contains "a tenant's release deploys no airlock") $tenant.0
+	let preview = (airlock-refusals true "" "pr-7")
+	assert equal ($preview | length) 1
+	assert ($preview.0 | str contains "a preview of an app with effects is refused") $preview.0
+	assert equal (airlock-refusals true "" "") []
+	assert equal (airlock-refusals false "game-1" "pr-7") [] "no effects, no refusal"
 }
 
-def test_airlock_in_cluster_sinks [] {
-	print "test an effect's k8s sink may be an in-cluster service over plain http, its namespace the daprd's only way to it..."
-	# A copy of effects beside it, so cue finds pronto's schema, whose facts name the sinks; removed
-	# whether or not the checks pass.
-	let dir = ($fixtures_dir | path join $".sinks-(random uuid)")
-	cp -r ($fixtures_dir | path join effects) $dir
-	let failed = (try { in-cluster-sinks-checks $dir; null } catch {|e| $e })
+
+def test_stale_airlock_cleanup [] {
+	print "test a tenant's release removes no airlock, any other removes what an earlier one left..."
+	let app = "game"
+	# A tenant's publisher may not delete NetworkPolicies (Studio's spec/tenants.cue): nothing is selected, nothing deleted.
+	for env_name in [metal kind gke] {
+		let t = (stale-airlock-cleanup $app [] false "game-1" $env_name)
+		assert equal $t.selectors [] $env_name
+		assert not $t.job
+	}
+	# A release without effects removes every airlock and bridge an earlier one left, and its upgrade job;
+	# metal's is the operator's, who holds the rights, so it does as the others.
+	for env_name in [kind metal] {
+		let none = (stale-airlock-cleanup $app [] false "" $env_name)
+		assert equal ($none.selectors | length) 2
+		assert ($none.selectors.0 | str contains "pronto.dev/bridge=true") $none.selectors.0
+		assert ($none.selectors.1 | str contains "component in (airlock,airlock-mesh)") $none.selectors.1
+		assert equal $none.kinds "service,networkpolicy,secret,configmap"
+		assert $none.job
+	}
+	# A release with an airlock removes only the bridges it no longer deploys.
+	let kept = (stale-airlock-cleanup $app [mail pdf] true "" gke)
+	assert equal ($kept.selectors | length) 1
+	assert ($kept.selectors.0 | str contains "notin (mail,pdf)") $kept.selectors.0
+	assert not $kept.job
+}
+
+def test_compose_stand_ins [] {
+	print "test where no airlock deploys, compose is read with stand-ins for what only the airlock side requires..."
+	let req = {|k| $"${($k):?($k) is required: an effect declares it}" }
+	let dir = (mktemp -d -t stand-ins.XXXXXX | str trim)
+	mkdir ($dir | path join inc)
+	# `include` with a defaulted variable in its path, as every app's compose has.
+	{services: {inc-svc: {image: "i:test"}}} | to yaml | save -f ($dir | path join inc a.yaml)
+	{
+		include: [{path: 'inc/${INC_MODE:-a}.yaml'}]
+		services: {
+			airlock: {image: "a:test", environment: {ALONE: (do $req ALONE), BRACED: (do $req BRACED), PASS_MAP: (do $req PASS_MAP), PASS_LIST: (do $req PASS_LIST), PASS_EQ: (do $req PASS_EQ), UNBRACED: (do $req UNBRACED), LABEL: (do $req LABEL), CMD: (do $req CMD), ARG: (do $req ARG), TOP: (do $req TOP), MORE: (do $req MORE), LITERAL: "$${NOT_A_VAR:?x}"}}
+			airlock-mesh: {image: "m:test", environment: {BRIDGE_MAIL_URL: "http://smtp:8080", AIRLOCK_BRIDGES: "mail"}}
+			smtp: {image: "s:test", environment: {SMTP_PASSWORD: (do $req SMTP_PASSWORD)}}
+			airlock-upgrade: {image: "u:test", environment: {UPGRADE_KEY: (do $req UPGRADE_KEY)}}
+			billing: {image: "b:test", environment: {BRACED: '${BRACED}', PASS_MAP: null, PASS_LIST: null}, labels: {l: '${LABEL}'}, command: 'run --key $UNBRACED $${CMD}'}
+			pager: {image: "p:test", environment: ["PASS_LIST", "PASS_EQ="], build: {context: ".", args: ["ARG"]}}
+			other: {image: "o:test", configs: ["c"], environment: {NOT_MORE: '${MORE_THAN}'}}
+		}
+		configs: {c: {content: '${TOP}'}}
+	} | to yaml | save -f ($dir | path join compose.yaml)
+	let all_set = {ALONE: a, BRACED: b, PASS_MAP: c, PASS_LIST: d, PASS_EQ: e, UNBRACED: f, LABEL: g, CMD: h, ARG: i, TOP: j, MORE: k, SMTP_PASSWORD: l, UPGRADE_KEY: m}
+	let alone = [ALONE CMD MORE PASS_EQ SMTP_PASSWORD UPGRADE_KEY]
+	let unset = ($alone | reduce -f $all_set {|k, acc| $acc | upsert $k null })
+	# Read plainly where nothing is unset: no stand-ins; and none where an airlock deploys.
+	assert equal (with-env $all_set { release-stand-ins $dir true }) {} "readable plainly: no stand-ins"
+	assert equal (with-env $unset { release-stand-ins $dir false }) {} "an airlock deploys: none"
+	# Unset, what only the airlock side requires (the airlock's, its upgrade job's and a bridge's container's, and
+	# `${MORE}` beside a service that reads `${MORE_THAN}`; an escaped $${CMD} is no read) takes a stand-in.
+	let made = (with-env $unset { release-stand-ins $dir true })
+	assert equal ($made | columns | sort) $alone $"($made | columns)"
+	# The operator's value is kept: a variable it sets is not missing.
+	let operators = (with-env ($unset | upsert ALONE "operator") { release-stand-ins $dir true })
+	assert ("ALONE" not-in $operators) "the operator's value wins over a stand-in"
+	# Plain, an unset effect secret fails as mecha writes it; with the stand-ins it parses, `include` and all.
+	let plain = (try { with-env $unset { compose-config $dir --services }; "" } catch {|e| $e.msg })
+	assert ($plain | str contains "is required: an effect declares it") $plain
+	let services = (with-env $unset { compose-config $dir --services --stand-ins $made } | sort)
+	assert ("inc-svc" in $services) $"include read: ($services)"
+	assert ("airlock" in $services)
+	# A variable another service reads still fails, naming it and its reader: a reference, a pass-through (a map
+	# key, a list entry), an unbraced one, a label, a build arg, a top-level config.
+	for k in [BRACED PASS_MAP PASS_LIST UNBRACED LABEL ARG TOP] {
+		let shared = (try { with-env ($unset | upsert $k null) { release-stand-ins $dir true }; "" } catch {|e| $e.msg })
+		assert ($shared | str contains $"($k) is an effect's secret and also read by") $"($k): ($shared)"
+	}
+	# What a service's env_file interpolates is a read too.
+	"LEAK=${ALONE}\n" | save -f ($dir | path join .env)
+	let filed = (open ($dir | path join compose.yaml) | upsert services.other.env_file [".env"])
+	$filed | to yaml | save -f ($dir | path join compose.yaml)
+	let any = (try { with-env $unset { release-stand-ins $dir true }; "" } catch {|e| $e.msg })
+	assert ($any | str contains "also read by other") $any
 	rm -r $dir
-	if $failed != null { error make {msg: $failed.msg} }
-}
-
-def in-cluster-sinks-checks [dir: string] {
-	let secrets = {SINK_TOKEN: "effects-sinks", MAIL_KEY: "effects-mail", PAGER_KEY: "effects-pager"}
-	let shared = {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"}
-	let facts = ($dir | path join .pronto cluster.json)
-	let render = {|sinks, app|
-		open $facts | upsert k8sSinks $sinks | to json | save -f $facts
-		let data = (mktemp -t sinks.XXXXXX.json | str trim)
-		{App: ({airlock: {secrets: $secrets}, networkPolicy: {internet: "airlock"}} | merge deep $app)} | to json | save -f $data
-		let out = (try { with-env $shared { render-manifests ($dir | path join release.cue) gke --data $data } | from yaml } catch {|e| $e.msg })
-		rm $data
-		$out
-	}
-	let meshed = {networkPolicy: {meshControlPlane: {}}}
-	let ledger = {service: {name: ledger, namespace: payments, port: 80, targetPort: 8080, path: "/v1"}}
-	let notify = {service: {name: notify, namespace: messaging, port: 8081, targetPort: 8081}}
-	let objs = (do $render {charge: $ledger, mail: $notify} $meshed)
-	let endpoints = ($objs | where kind == "ConfigMap" and metadata.name == "effects-airlock-endpoints" | first | get data)
-	assert equal ($endpoints."charge.yaml" | from yaml | get spec.baseUrl) "http://ledger.payments.svc.cluster.local/v1" "port 80 is the scheme's own"
-	assert equal ($endpoints."mail.yaml" | from yaml | get spec.baseUrl) "http://notify.messaging.svc.cluster.local:8081"
-	let meshPod = ($objs | where kind == "Deployment" and metadata.name == "effects-airlock-mesh" | first | get spec.template)
-	assert equal ($meshPod.spec.containers.0.env | where name =~ "^(AIRLOCK_|BRIDGE_|TSBIFROST)" | select name value) [{name: AIRLOCK_ORIGINS, value: "http://ledger.payments.svc.cluster.local http://notify.messaging.svc.cluster.local:8081"}] "what the pod reaches, not compose's"
-	let mesh = ($objs | where kind == "NetworkPolicy" and metadata.name == "effects-airlock-mesh" | first | get spec)
-	assert ($mesh.egress | all {|r| $r.to | all {|t| $t.ipBlock? == null or $t.ipBlock.cidr != "0.0.0.0/0" } }) "every sink in the cluster: no internet at all"
-	let peer = {|egress| $egress | where {|r| $r.to.0.namespaceSelector? != null and ($r.to.0.namespaceSelector.matchLabels."kubernetes.io/metadata.name") not-in [kube-system istio-system] } }
-	assert equal (do $peer $mesh.egress | each {|r| [($r.to.0.namespaceSelector.matchLabels."kubernetes.io/metadata.name") ($r.ports | get port)] } | sort) [[messaging [8081]] [payments [8080]]] "each sink's namespace on its pods' port, not the Service's"
-	# A changed endpoint changes the pod's template, so the daprd rolls to read it.
-	let moved = (do $render {charge: ($ledger | upsert service.path "/v2"), mail: $notify} $meshed | where kind == "Deployment" and metadata.name == "effects-airlock-mesh" | first | get spec.template.metadata.annotations."pronto.dev/config")
-	assert ($moved != $meshPod.metadata.annotations."pronto.dev/config") "the endpoints' hash"
-	# The sink's pods' labels narrow the peer from its namespace to them.
-	let narrowed = (do $render {charge: ($ledger | upsert service.podSelector {app: ledger}), mail: $notify} $meshed | where kind == "NetworkPolicy" and metadata.name == "effects-airlock-mesh" | first | get spec.egress)
-	assert equal (do $peer $narrowed | where {|r| $r.to.0.namespaceSelector.matchLabels."kubernetes.io/metadata.name" == payments } | get to.0) [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": payments}}, podSelector: {matchLabels: {app: ledger}}}]
-	# One origin left: the internet on its port alone, beside the in-cluster peer.
-	let mixed = (do $render {charge: $ledger, mail: {origin: "https://mail.example.com:8443"}} $meshed | where kind == "NetworkPolicy" and metadata.name == "effects-airlock-mesh" | first | get spec.egress)
-	assert equal ($mixed | where {|r| $r.to.0.ipBlock? != null } | first | get ports.port) [8443]
-	assert equal (do $peer $mixed | get to.0.namespaceSelector.matchLabels."kubernetes.io/metadata.name") [payments]
-	# A service mesh's sidecars reach its control plane from both pods, only when named.
-	for n in [airlock airlock-mesh] {
-		let egress = ($objs | where kind == "NetworkPolicy" and metadata.name == $"effects-($n)" | first | get spec.egress)
-		assert equal ($egress | last) {to: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": istio-system}}}], ports: [{port: 15012, protocol: TCP}]} $n
-	}
-	let named = (do $render {charge: $ledger, mail: $notify} {networkPolicy: {meshControlPlane: {namespace: mesh-system, ports: [15012 15017]}}} | where kind == "NetworkPolicy" and metadata.name == "effects-airlock" | first | get spec.egress | last)
-	assert equal $named {to: [{namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": mesh-system}}}], ports: [{port: 15012, protocol: TCP} {port: 15017, protocol: TCP}]}
-	let portless = (do $render {charge: $ledger, mail: $notify} {networkPolicy: {meshControlPlane: {ports: []}}, airlock: {plaintext: true}})
-	assert ($portless | str contains "networkPolicy.meshControlPlane.ports") $"a control plane on no port is refused: ($portless)"
-	# Plain HTTP carries the credential and the body in cleartext: a mesh encrypts it, or the release says it knows.
-	let clear = (do $render {charge: $ledger, mail: $notify} {})
-	assert ($clear | str contains "airlock.plaintext: true") $clear
-	let stated = (do $render {charge: $ledger, mail: $notify} {airlock: {plaintext: true}})
-	assert (($stated | describe) != "string") $"($stated)"
-	assert (($stated | where kind == "NetworkPolicy" and metadata.name == "effects-airlock" | first | get spec.egress | length) == 3) "no control plane unless named"
-	# Neither kube-system, the mesh's control plane nor, without a podSelector, the app's own namespace
-	# is a sink's to open whole.
-	for ns in [effects kube-system istio-system] {
-		let inside = (do $render {charge: ($ledger | upsert service.namespace $ns), mail: $notify} $meshed)
-		assert ($inside | str contains $"charge \(($ns)\)") $inside
-	}
-	let own = (do $render {charge: ($ledger | upsert service.namespace effects | upsert service.podSelector {app: ledger}), mail: $notify} $meshed)
-	assert (($own | describe) != "string") $"the app's own namespace through a podSelector: ($own)"
-	# What the target cannot deploy, or a cluster.json written before k8sSinks, fails the release.
-	let none = (do $render {charge: null, mail: $notify} $meshed)
-	assert ($none | str contains "effect charge names no sink for target k8s") $none
-	let bridged = (do $render {charge: {bridge: pdf}, mail: $notify} $meshed)
-	assert ($bridged | str contains "container bridges") $bridged
-	let ai = (do $render {charge: {ai: text, tier: cheap}, mail: $notify} $meshed)
-	assert ($ai | str contains "AI gateway") $ai
-	open $facts | reject k8sSinks | to json | save -f $facts
-	let stale = (try { with-env $shared { render-manifests ($dir | path join release.cue) gke }; "" } catch {|e| $e.msg })
-	assert ($stale | str contains "generate the app again") $stale
-	# A bridge's container and the AI gateway run beside the airlock in compose and in no pod here: a
-	# variable either requires takes a stand-in, so the operator exports neither's.
-	let compose = ($dir | path join compose.yaml)
-	open $compose
-		| upsert services.smtp {image: "smtp:test", environment: {SMTP_USER: "${SMTP_USER:?u}", SMTP_PASSWORD: "${SMTP_PASSWORD:?p}"}}
-		| upsert services.tsbifrost {image: "tsbifrost:test", environment: {OPENAI_API_KEY: "${OPENAI_API_KEY:?k}"}}
-		| upsert services.billing.environment.SMTP_USER "${SMTP_USER}"
-		| upsert services.airlock-mesh.environment.AIRLOCK_BRIDGES "mail tsbifrost"
-		| upsert services.airlock-mesh.environment.BRIDGE_MAIL_URL "http://smtp:8080"
-		| to yaml | save -f $compose
-	let raw = (compose-raw $dir)
-	assert equal (airlock-peers $raw | sort) [smtp tsbifrost]
-	assert equal (airlock-peer-secrets $raw | sort) [OPENAI_API_KEY SMTP_PASSWORD] "SMTP_USER is billing's too, from the environment"
-	let bridged_here = (with-env {SMTP_USER: "operator-user", SMTP_PASSWORD: null, OPENAI_API_KEY: null} { do $render {charge: $ledger, mail: $notify} $meshed })
-	assert (($bridged_here | describe) != "string") $"a simulator's bridge in compose beside a service here: ($bridged_here)"
-	assert equal ($bridged_here | where kind == "Deployment" | get metadata.name | where {|n| $n =~ "smtp|tsbifrost" }) []
-	rm $facts
-	let ungenerated = (try { with-env ($shared | insert SMTP_USER "operator-user") { release-runtime $dir gke }; "" } catch {|e| $e.msg })
-	assert ($ungenerated | str contains "cluster.json is missing: generate the app") $ungenerated
-}
-
-def test_airlock_compose_reads [] {
-	print "test an airlock-only secret is a stand-in for every compose read, a shared one the operator's, and secrets are checked by key..."
-	let dir = ($fixtures_dir | path join effects)
-	let raw = (do { cd $dir; docker compose config --no-interpolate --format json } | from json)
-	# billing reads SINK_TOKEN by reference, pager passes PAGER_KEY through by name.
-	assert equal (airlock-shared-secrets $raw) {SINK_TOKEN: [billing], PAGER_KEY: [pager]}
-	let shared = {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"}
-	# MAIL_KEY is the airlock's alone: unset, every read the release makes (auth, its own services,
-	# migrate) still works, and the operator need not export it.
-	assert equal (with-env ($shared | insert MAIL_KEY null) { airlock-stand-ins $dir }) {MAIL_KEY: secretKeyRef}
-	let own = (with-env ($shared | insert MAIL_KEY null) { app-services-environment (compose-config $dir --json) [billing pager] {billing: [], pager: []} })
-	# A service that reads a shared name gets the operator's value, never a stand-in,
-	assert equal $own.billing.env.SINK_TOKEN "operator-value"
-	assert equal $own.pager.env.PAGER_KEY "operator-pager"
-	# and unset, the release fails naming who reads it.
-	let unset = (try { with-env {MAIL_KEY: null, SINK_TOKEN: "operator-value", PAGER_KEY: null} { compose-config $dir --json }; "" } catch {|e| $e.msg })
-	assert ($unset | str contains "PAGER_KEY is an effect's secret and also pager's") $unset
-	assert equal (with-env ($shared | insert MAIL_KEY null) { compose-config $dir --services } | sort) [airlock airlock-mesh billing pager ticker]
-	# What reads a variable: a reference, the name passed through, an env_file; `$$` is an escape.
-	let airlock = {environment: {KEY: "${KEY:?k}", KEY_2: "${KEY_2:?k}"}}
-	let readers = {|svc| airlock-shared-secrets {services: {airlock: $airlock, s: $svc}} }
-	assert equal (do $readers {environment: {A: "$KEY"}}) {KEY: [s]}
-	assert equal (do $readers {environment: {A: "x${KEY}y"}}) {KEY: [s]}
-	assert equal (do $readers {environment: {A: "${KEY:-x}"}}) {KEY: [s]}
-	assert equal (do $readers {environment: {A: "$KEY_2"}}) {KEY_2: [s]} "KEY_2 is not KEY"
-	assert equal (do $readers {environment: {A: "$$KEY", B: "$${KEY}"}}) {} "an escape reads nothing"
-	assert equal (do $readers {environment: {A: "$$$KEY"}}) {KEY: [s]} "an escaped dollar, then a read"
-	assert equal (do $readers {environment: ["KEY"]}) {KEY: [s]}
-	assert equal (do $readers {environment: ["KEY=literal"]}) {KEY: [s]}
-	assert equal (do $readers {environment: {KEY: null}}) {KEY: [s]}
-	assert equal (do $readers {env_file: [{path: "x.env"}]}) {KEY: [s], KEY_2: [s]} "an env_file may hold any"
-	# The airlock reads no other variable from the environment than its secrets and what the release sets.
-	let stray = (try { airlock-secrets {services: {airlock: {environment: {KEY: "${KEY:?k}", TOKEN: "${TOKEN}"}}}}; "" } catch {|e| $e.msg })
-	assert ($stray | str contains "reads TOKEN from the environment") $stray
-	let through = (try { airlock-secrets {services: {airlock: {environment: ["KEY"]}}}; "" } catch {|e| $e.msg })
-	assert ($through | str contains "reads KEY") $through
-	assert equal (airlock-secrets {services: {airlock: {environment: {DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}@database", ORIGIN: "${ORIGIN:-http://localhost}", AIRLOCK_DIR: "/airlock", N: "$$X"}}}}) []
-	# A build that reads an effect's secret would bake it into an image: refused.
-	assert equal (airlock-build-refusals $raw) []
-	let baked = (airlock-build-refusals {services: {airlock: $airlock, web: {build: {context: ".", args: {T: "${KEY}"}}}}})
-	assert ($baked | first | str contains "web's build reads KEY") ($baked | to nuon)
-	# An arg passed through by name reads the environment too; normalization drops it, so compose-raw
-	# keeps the project unnormalized.
-	let project = (mktemp -d)
-	"services:
-  airlock:
-    image: a
-    environment:
-      KEY: \"${KEY:?k}\"
-  listed:
-    build: {context: ., args: [KEY, OTHER=1]}
-  mapped:
-    build:
-      context: .
-      args:
-        KEY:
-" | save -f ($project | path join compose.yaml)
-	assert equal (airlock-build-refusals (compose-raw $project) | sort) ["listed's build reads KEY, an effect's secret: an image would carry it" "mapped's build reads KEY, an effect's secret: an image would carry it"]
-	# Compose merges the airlock's env_file into its environment, which the release would write out.
-	"services:
-  airlock:
-    image: a
-    env_file: [airlock.env]
-    environment:
-      KEY: \"${KEY:?k}\"
-" | save -f ($project | path join compose.yaml)
-	"TOKEN=plaintext\n" | save -f ($project | path join airlock.env)
-	let filed = (try { airlock-secrets (compose-raw $project); "" } catch {|e| $e.msg })
-	assert ($filed | str contains "airlock reads an env_file") $filed
-	# So would its daprd's, whose environment the release writes out too.
-	"services:
-  airlock:
-    image: a
-    environment:
-      KEY: \"${KEY:?k}\"
-  airlock-mesh:
-    image: m
-    env_file: [airlock.env]
-" | save -f ($project | path join compose.yaml)
-	let mesh_filed = (try { airlock-secrets (compose-raw $project); "" } catch {|e| $e.msg })
-	assert ($mesh_filed | str contains "airlock-mesh reads an env_file") $mesh_filed
-	rm -r $project
-	# Cloud Build's compose reads a stand-in for every airlock secret, a shared one too, never an
-	# operator's value; the gcp target's build, none.
-	let step = (with-env ($shared | insert MAIL_KEY "operator-mail") { cloud-build-step "docker compose config" (airlock-secrets $raw | each {|k| $"($k)=secretKeyRef" }) })
-	assert equal ($step.env | sort) ["MAIL_KEY=secretKeyRef" "PAGER_KEY=secretKeyRef" "SINK_TOKEN=secretKeyRef" "SOURCE_DATE_EPOCH=0"]
-	assert not ($step | to yaml | str contains "operator-")
-	assert equal (cloud-build-step "true" []).env ["SOURCE_DATE_EPOCH=0"]
-	# check-airlock-secrets reads keys alone, and only NotFound means missing.
-	let bin = (mktemp -d)
-	"#!/bin/sh
-case \"$*\" in
-  *present*) printf 'SINK_TOKEN\\n' ;;
-  *absent*) echo 'Error from server (NotFound): secrets \"absent\" not found' >&2; exit 1 ;;
-  *) echo 'Error from server (Forbidden): secrets is forbidden' >&2; exit 1 ;;
-esac
-" | save -f ($bin | path join kubectl)
-	chmod +x ($bin | path join kubectl)
-	let deployment = {|name| [{kind: Deployment, spec: {template: {metadata: {labels: {"app.kubernetes.io/component": airlock}}, spec: {containers: [{env: [
-		{name: PGPASSWORD, valueFrom: {secretKeyRef: {name: effects-db-postgres, key: password}}}
-		{name: SINK_TOKEN, valueFrom: {secretKeyRef: {name: $name, key: SINK_TOKEN}}}
-	]}]}}}}] }
-	let run = {|name| with-env {PATH: ($env.PATH | prepend $bin)} { try { check-airlock-secrets (do $deployment $name) effects; "" } catch {|e| $e.msg } } }
-	assert equal (do $run present) ""
-	assert ((do $run absent) | str contains "needs SINK_TOKEN") (do $run absent)
-	let denied = (do $run denied)
-	assert (($denied | str contains "Forbidden") and not ($denied | str contains "needs")) $"another failure is itself: ($denied)"
-	rm -r $bin
-}
-
-def test_airlock_seal_key [] {
-	print "test the airlock's seal keys: Secrets in the release, the development key refused, none without secret fields..."
-	let dev = "REVWLUtFWS1GT1ItVEVTVFM"
-	let dir = ($fixtures_dir | path join effects-seal)
-	rm -rf $dir
-	cp -r ($fixtures_dir | path join effects) $dir
-	let compose = ($dir | path join compose.yaml)
-	let with_seal = (open --raw $compose | str replace "      MAIL_KEY: ${MAIL_KEY:-simulator}\n" $"      MAIL_KEY: ${MAIL_KEY:-simulator}\n      AIRLOCK_SEAL_DEV: local\n      AIRLOCK_SEAL_KEY: ${AIRLOCK_SEAL_KEY:-($dev)}\n      AIRLOCK_SEAL_KEY_PREVIOUS: ${AIRLOCK_SEAL_KEY_PREVIOUS:-}\n")
-	assert ($with_seal | str contains "AIRLOCK_SEAL_KEY_PREVIOUS") "the fixture takes the seal variables"
-	let plain = (open --raw $compose)
-	$with_seal | save -f $compose
-	let raw = (compose-raw $dir)
-	assert equal (airlock-secrets $raw | sort) [AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS MAIL_KEY PAGER_KEY SINK_TOKEN]
-	assert equal (airlock-dev-seal-key $raw) $dev
-	let all = {SINK_TOKEN: "effects-sinks", MAIL_KEY: "effects-mail", PAGER_KEY: "effects-pager", AIRLOCK_SEAL_KEY: "effects-seal"}
-	let data = (mktemp -t seal.XXXXXX.json | str trim)
-	let render = {|secrets|
-		{App: {airlock: {secrets: $secrets}, networkPolicy: {internet: "airlock"}}} | to json | save -f $data
-		with-env {SINK_TOKEN: "operator-value", PAGER_KEY: "operator-pager"} { render-manifests ($dir | path join release.cue) gke --data $data | from yaml }
-	}
-	let airlock_env = {|objs| $objs | where kind == "Deployment" and metadata.name == "effects-airlock" | first | get spec.template.spec.containers.0.env }
-	# The current key from its Secret; the previous one, a rotation's, only where the release names it.
-	let vars = (do $airlock_env (do $render $all))
-	let key = ($vars | where name == AIRLOCK_SEAL_KEY | first)
-	assert ($key.value? == null) "the seal key has no value of its own"
-	assert equal $key.valueFrom.secretKeyRef {name: effects-seal, key: AIRLOCK_SEAL_KEY}
-	assert equal ($vars | where name in [AIRLOCK_SEAL_KEY_PREVIOUS AIRLOCK_SEAL_DEV] | length) 0 "no previous key unnamed, and no AIRLOCK_SEAL_DEV"
-	let rotated = (do $airlock_env (do $render ($all | insert AIRLOCK_SEAL_KEY_PREVIOUS "effects-seal-old")))
-	assert equal ($rotated | where name == AIRLOCK_SEAL_KEY_PREVIOUS | first | get valueFrom.secretKeyRef) {name: effects-seal-old, key: AIRLOCK_SEAL_KEY_PREVIOUS}
-	assert equal ($rotated | where name == AIRLOCK_SEAL_DEV | length) 0
-	let unplaced = (try { do $render ($all | reject AIRLOCK_SEAL_KEY); "" } catch {|e| $e.msg })
-	assert ($unplaced | str contains "AIRLOCK_SEAL_KEY") $"an unplaced seal key fails the release: ($unplaced)"
-	rm $data
-	# No secret field, no seal variables: the airlock's secrets are the effects' alone.
-	$plain | save -f $compose
-	assert equal (airlock-secrets (compose-raw $dir) | sort) [MAIL_KEY PAGER_KEY SINK_TOKEN]
-	assert equal (airlock-dev-seal-key (compose-raw $dir)) ""
-	rm -rf $dir
-	# The development key is refused in any spelling; another key, an unset previous one and an
-	# unnamed Secret all pass the check, which reads the key's value and prints none.
-	assert equal (seal-key-bytes $dev) (seal-key-bytes "REVWLUtFWS1GT1ItVEVTVFM=")
-	assert equal (seal-key-bytes "-_-_") (seal-key-bytes "+/+/")
-	let bin = (mktemp -d)
-	"#!/bin/sh
-case \"$*\" in
-  *secret?dev?*jsonpath*) printf %s \"$DEV_B64\" ;;
-  *jsonpath*) printf %s \"$OWN_B64\" ;;
-  *) printf 'AIRLOCK_SEAL_KEY\\n' ;;
-esac
-" | save -f ($bin | path join kubectl)
-	chmod +x ($bin | path join kubectl)
-	let deployment = {|name| [{kind: Deployment, spec: {template: {metadata: {labels: {"app.kubernetes.io/component": airlock}}, spec: {containers: [{env: [
-		{name: AIRLOCK_SEAL_KEY, valueFrom: {secretKeyRef: {name: $name, key: AIRLOCK_SEAL_KEY}}}
-	]}]}}}}] }
-	let run = {|name| with-env {PATH: ($env.PATH | prepend $bin), DEV_B64: ("REVWLUtFWS1GT1ItVEVTVFM=" | encode base64), OWN_B64: ("b3duLWtleS1vZi10aGUtZGVwbG95bWVudA==" | encode base64)} { try { check-airlock-secrets (do $deployment $name) effects --dev-key $dev; "" } catch {|e| $e.msg } } }
-	assert equal (do $run own) ""
-	let refused = (do $run dev)
-	assert ($refused | str contains "development key") $refused
-	assert not ($refused | str contains "REVWLUtFWS1GT1ItVEVTVFM") "the refusal prints no key"
-	rm -r $bin
 }
 
 def test_replicas_budget_spread [] {
@@ -2462,4 +2195,399 @@ def test_set_cpu [] {
 	let manifest = "        resources:\n          limits:\n            cpu: 100m\n            memory: 200Mi\n          requests:\n            cpu: 100m\n            memory: 100Mi\n        securityContext:\n"
 	assert equal ($manifest | set-cpu {request: "150m", limit: "500m"}) "        resources:\n          limits:\n            cpu: 500m\n            memory: 200Mi\n          requests:\n            cpu: 150m\n            memory: 100Mi\n        securityContext:\n"
 	assert equal ($OPERATORS | where name == "cnpg" | first | get cpu) {request: "150m", limit: "500m"}
+}
+
+# The fixture's compose project and facts: an effect through an origin, one
+# through a container bridge, one through an isolate bridge, and one through
+# a bridge only docker runs.
+def effects-manifests [--data: record]: nothing -> list {
+	let app = (resolve-app ($fixtures_dir | path join effects))
+	if $data == null { return (render-manifests $app.cue_path kind | from yaml) }
+	let file = (mktemp -t effects.XXXXXX.json | str trim)
+	{App: $data} | to json | save -f $file
+	let yaml = (render-manifests $app.cue_path kind --data $file)
+	rm $file
+	$yaml | from yaml
+}
+
+def test_airlock_manifests [] {
+	print "test the airlock, its daprd and its bridges run compose's images, the daprd on k8s's endpoints..."
+	let docs = (effects-manifests)
+	let deployment = {|name| $docs | where kind == Deployment and metadata.name == $name | first | get spec.template }
+	# The daprd is its own pod on compose's image, never the airlock's sidecar,
+	# and holds k8s's endpoints over the image's, which are docker's.
+	let mesh = (do $deployment effects-airlock-mesh)
+	assert (($mesh.metadata.annotations? | default {} | columns | where {|a| $a starts-with "dapr.io/" }) | is-empty)
+	assert equal ($mesh.spec.containers | length) 1
+	assert equal $mesh.spec.containers.0.image "localhost:5001/effects-airlock-mesh:latest"
+	assert equal ($mesh.spec.containers.0.volumeMounts | each {|m| [$m.mountPath $m.subPath] }) [[/dapr/airlock/charge.yaml charge.yaml] [/dapr/airlock/echo.yaml echo.yaml] [/dapr/airlock/fetch.yaml fetch.yaml] [/dapr/airlock/render.yaml render.yaml]]
+	assert equal $mesh.spec.volumes.0.configMap.name effects-airlock-endpoints
+	let endpoints = ($docs | where kind == ConfigMap and metadata.name == effects-airlock-endpoints | first | get data | items {|f, y| $y | from yaml } | reduce -f {} {|e, acc| $acc | insert $e.metadata.name $e.spec.baseUrl })
+	assert equal $endpoints {charge: "https://api.acquirer.example", echo: "http://echo:8080", fetch: "http://transport:8080", render: "http://pdf:8080"}
+	assert ($mesh.metadata.annotations."pronto.dev/endpoints-digest" =~ '^[0-9a-f]{64}$')
+	# The airlock runs compose's image, told its target, the door's origin and
+	# the ledger's owner; its secrets are references.
+	let airlock = (do $deployment effects-airlock)
+	assert equal $airlock.spec.containers.0.image "localhost:5001/effects-airlock:latest"
+	let vars = $airlock.spec.containers.0.env
+	let value = {|name| $vars | where name == $name | first | get -o value }
+	assert equal (do $value AIRLOCK_TARGET) k8s
+	assert equal (do $value ORIGIN) "https://effects.localhost"
+	assert equal (do $value MESH_URL) "http://airlock-mesh:3500"
+	assert equal (do $value AIRLOCK_DIR) /airlock
+	assert equal (do $value DATABASE_URL) 'postgresql://postgres:$(PGPASSWORD)@database:5432/effects?sslmode=disable'
+	assert equal ($vars | where name == PGPASSWORD | first | get valueFrom.secretKeyRef) {name: effects-db-postgres, key: password}
+	assert equal ($vars | where name == ACQUIRER_KEY | first | get valueFrom.secretKeyRef) {name: effects-airlock, key: ACQUIRER_KEY}
+	# The seal keys are references to the same Secret, the replaced one only
+	# through a rotation; the airlock is never told it is the local stack's.
+	assert equal ($vars | where name == AIRLOCK_SEAL_KEY | first | get valueFrom.secretKeyRef) {name: effects-airlock, key: AIRLOCK_SEAL_KEY}
+	assert equal ($vars | where name == AIRLOCK_SEAL_KEY_PREVIOUS | first | get valueFrom.secretKeyRef) {name: effects-airlock, key: AIRLOCK_SEAL_KEY_PREVIOUS, optional: true}
+	assert ($vars | where name == AIRLOCK_SEAL_DEV | is-empty)
+	# The ledger's upgrade runs as a Job on its own image, after initdb.
+	let jobs = ($docs | where kind == Job | get metadata.name)
+	assert equal $jobs [effects-initdb effects-airlock-upgrade]
+	assert equal ($docs | where kind == Job and metadata.name == effects-airlock-upgrade | first | get spec.template.spec.containers.0.image) "localhost:5001/effects-airlock-upgrade:latest"
+	# A bridge on k8s runs its container's image, a container bridge and an
+	# isolate alike, under the container's name; the docker-only one does not.
+	for b in [{c: echo, build: echo-appliance} {c: transport, build: transport-appliance}] {
+		let spec = ($docs | where kind == Deployment and metadata.name == $"effects-bridge-($b.c)" | first | get spec)
+		assert equal $spec.replicas 1 $"($b.c) stays up for the call that needs it"
+		assert equal $spec.template.spec.containers.0.image $"localhost:5001/effects-($b.build):latest"
+		assert equal $spec.template.spec.containers.0.envFrom [{secretRef: {name: $"effects-bridge-($b.c)", optional: true}}]
+		assert equal $spec.template.spec.containers.0.readinessProbe.tcpSocket.port 8080
+	}
+	assert equal ($docs | where kind == Service | get metadata.name | where $it in [airlock airlock-mesh echo transport pdf] | sort) [airlock airlock-mesh echo transport]
+	assert ($docs | where metadata.name == effects-pdf | is-empty)
+	# The ticker's wake reaches the airlock as compose's does.
+	let ticker = (do $deployment effects-ticker | get spec.containers.0.env | where name == WAKE_URLS | first | get value)
+	assert equal $ticker "http://airlock:9997/healthz"
+	# No value compose resolved for a secret, a bridge's environment or the
+	# database lands in a manifest.
+	let yaml = ($docs | to yaml)
+	for leaked in [sk_live_from_the_environment tt_from_the_environment dev-password dev-token ZGV2LXNlYWwta2V5] {
+		assert not ($yaml | str contains $leaked) $"($leaked) is in the manifests"
+	}
+	# A rotated secret rolls the airlock, and a bridge's environment its pod.
+	let digest = ("a" | fill -c "a" -w 64)
+	let rolled = (effects-manifests --data {airlock: {secretDigest: $digest, bridges: {echo: {envDigest: $digest}}}})
+	assert equal ($rolled | where kind == Deployment and metadata.name == effects-airlock | first | get spec.template.metadata.annotations."pronto.dev/airlock-secret-digest") $digest
+	assert equal ($rolled | where kind == Deployment and metadata.name == effects-bridge-echo | first | get spec.template.metadata.annotations."pronto.dev/env-digest") $digest
+}
+
+def test_airlock_wall [] {
+	print "test compose's networks are NetworkPolicies: the airlock reaches only its database and daprd..."
+	let policies = (effects-manifests | where kind == NetworkPolicy)
+	let policy = {|name| $policies | where metadata.name == $name | first | get spec }
+	let component = {|c| {"app.kubernetes.io/component": $c, "app.kubernetes.io/name": effects} }
+	let airlock = (do $policy effects-airlock)
+	assert equal $airlock.policyTypes [Ingress Egress]
+	# In: the ticker's wake alone. Out: DNS, the database and the daprd; no
+	# address block, so nothing past the cluster.
+	assert equal $airlock.ingress [{from: [{podSelector: {matchLabels: (do $component ticker)}}], ports: [{port: 9997, protocol: TCP}]}]
+	assert equal ($airlock.egress | length) 3
+	# DNS goes to the cluster's resolver alone: port 53 anywhere is a way out.
+	let resolver = {namespaceSelector: {matchLabels: {"kubernetes.io/metadata.name": kube-system}}, podSelector: {matchLabels: {"k8s-app": kube-dns}}}
+	for p in [effects-airlock effects-airlock-mesh effects-bridge-echo effects-bridge-transport] {
+		assert equal ((do $policy $p).egress.0.to) [$resolver] $"($p)'s DNS goes past the cluster's resolver"
+	}
+	assert equal ($airlock.egress | skip 1 | get to | flatten | each {|t| $t.podSelector.matchLabels }) [{"cnpg.io/cluster": effects-db} (do $component airlock-mesh)]
+	assert not (($airlock | to json) | str contains ipBlock)
+	# The daprd: the airlock in; the bridges it calls, by port, and the world
+	# but the cluster's own and the cloud's metadata addresses out.
+	let mesh = (do $policy effects-airlock-mesh)
+	assert equal $mesh.ingress [{from: [{podSelector: {matchLabels: (do $component airlock)}}], ports: [{port: 3500, protocol: TCP}]}]
+	let peers = ($mesh.egress | skip 1 | get -o to | compact | flatten | where podSelector? != null | get podSelector.matchLabels."app.kubernetes.io/component")
+	assert equal $peers [echo transport]
+	let world = ($mesh.egress | last | get to)
+	assert equal $world.0.ipBlock.cidr 0.0.0.0/0
+	for internal in [10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 127.0.0.0/8] {
+		assert ($internal in $world.0.ipBlock.except) $"the daprd reaches ($internal)"
+	}
+	# Each bridge: the daprd in, the world out, and nothing of the cluster.
+	for c in [echo transport] {
+		let bridge = (do $policy $"effects-bridge-($c)")
+		assert equal $bridge.ingress [{from: [{podSelector: {matchLabels: (do $component airlock-mesh)}}], ports: [{port: 8080, protocol: TCP}]}]
+		assert equal ($bridge.egress | skip 1 | get -o to | compact | flatten | where podSelector? != null) []
+		assert equal ($bridge.egress | last | get to) $world
+	}
+	# The app's own services admit its pods by name, a bridge's never: one
+	# whose plugin holds it to its policy only once it runs has the database
+	# and the services in reach until then. None of the three holds a token
+	# for the API.
+	let docs = (effects-manifests)
+	let excluded = {matchLabels: {"app.kubernetes.io/name": effects}, matchExpressions: [{key: "pronto.dev/bridge", operator: DoesNotExist}]}
+	# Nor does a rule open to every source, but the door's.
+	for p in [effects-database-netpol effects-backends-netpol effects-ticker] {
+		let open = ($docs | where kind == NetworkPolicy and metadata.name == $p | first | get spec.ingress | where {|r| ($r.from? | default []) | is-empty })
+		assert equal $open [] $"($p) admits every source"
+	}
+	for p in [effects-database-netpol effects-backends-netpol effects-caddy-netpol effects-ticker] {
+		let named = ($docs | where kind == NetworkPolicy and metadata.name == $p | first | get spec.ingress | get -o from | compact | flatten | where podSelector? == {matchLabels: {"app.kubernetes.io/name": effects}})
+		assert equal $named [] $"($p) admits a bridge by the app's name"
+		assert (($docs | where kind == NetworkPolicy and metadata.name == $p | first | get spec.ingress | get -o from | compact | flatten | where podSelector? == $excluded) | is-not-empty) $"($p) admits none of the app's pods by name"
+	}
+	for d in [effects-bridge-echo effects-bridge-transport] {
+		assert equal ($docs | where kind == Deployment and metadata.name == $d | first | get spec.template.metadata.labels."pronto.dev/bridge") "true"
+	}
+	# A bridge's objects carry the label too, by which a later release removes
+	# those of a bridge no longer on k8s.
+	assert equal ($docs | where {|d| ($d.metadata.labels?."pronto.dev/bridge"? | default "") == "true" } | each {|d| $"($d.kind)/($d.metadata.name)" } | sort) [Deployment/effects-bridge-echo Deployment/effects-bridge-transport NetworkPolicy/effects-bridge-echo NetworkPolicy/effects-bridge-transport Service/echo Service/transport]
+	assert equal (opaque-secret effects-bridge-echo effects {} --labels {"pronto.dev/bridge": "true"} | get metadata.labels) {"pronto.dev/bridge": "true"}
+	assert ("labels" not-in (opaque-secret effects-airlock effects {} | get metadata))
+	for d in [effects-airlock effects-airlock-mesh effects-bridge-echo effects-bridge-transport] {
+		assert equal ($docs | where kind == Deployment and metadata.name == $d | first | get spec.template.spec.automountServiceAccountToken) false $"($d) holds a token for the API"
+	}
+	# The cluster's own addresses, by family, which may be public.
+	let addresses = [203.0.113.7/32 198.51.100.0/24 2001:db8::7/128]
+	let read = (effects-manifests --data {airlock: {clusterAddresses: $addresses, resolvers: [169.254.20.10/32]}} | where kind == NetworkPolicy)
+	# DNS also goes to the resolver the kubelets name, a node-local cache's.
+	for p in [effects-airlock effects-airlock-mesh effects-bridge-echo effects-bridge-transport] {
+		assert equal ($read | where metadata.name == $p | first | get spec.egress.0.to) [$resolver {ipBlock: {cidr: 169.254.20.10/32}}]
+	}
+	for p in [effects-airlock-mesh effects-bridge-echo effects-bridge-transport] {
+		let world = ($read | where metadata.name == $p | first | get spec.egress | last | get to)
+		assert equal ($world.0.ipBlock.except | last 2) [203.0.113.7/32 198.51.100.0/24] $"($p) reaches the cluster's public IPv4 addresses"
+		assert equal ($world.1.ipBlock.except | last) 2001:db8::7/128 $"($p) reaches the cluster's public IPv6 addresses"
+	}
+}
+
+def test_wall_probes [] {
+	print "test the wall is certified by probes standing as the airlock and its daprd, with the world as the control..."
+	# A pod address outside every private range and every node's pod range is
+	# one the release cannot keep the daprd and bridges from.
+	let pods = [
+		{spec: {}, status: {podIPs: [{ip: 10.244.0.7}]}}
+		{spec: {}, status: {podIPs: [{ip: 203.0.113.40} {ip: "2001:db8:1::9"}]}}
+		{spec: {}, status: {podIPs: [{ip: "2001:db8:2::9"}]}}
+		{spec: {hostNetwork: true}, status: {podIPs: [{ip: 198.51.100.3}]}}
+	]
+	let ranged = [{spec: {podCIDRs: [10.244.0.0/24 "2001:db8:1::/64"]}} {spec: {}}]
+	assert equal (unranged-pod-addresses $pods $ranged) [203.0.113.40 "2001:db8:2::9"]
+	# The cluster's addresses: each node's and the API server's, whole-host,
+	# and the nodes' pod ranges.
+	let nodes = [
+		{status: {addresses: [{type: InternalIP, address: 10.0.0.4} {type: ExternalIP, address: 203.0.113.7} {type: Hostname, address: node-a} {type: InternalIP, address: "2001:db8::4"}]}, spec: {podCIDRs: [10.244.0.0/24 "2001:db8:1::/64"]}}
+		{status: {addresses: [{type: ExternalIP, address: 203.0.113.8}]}, spec: {podCIDR: 10.244.1.0/24}}
+	]
+	let slices = [{endpoints: [{addresses: [198.51.100.9]} {addresses: [203.0.113.7]}]}]
+	assert equal (cluster-address-blocks $nodes $slices) [10.0.0.4/32 10.244.0.0/24 10.244.1.0/24 198.51.100.9/32 "2001:db8:1::/64" "2001:db8::4/128" 203.0.113.7/32 203.0.113.8/32]
+	# A probe is held by the policies of the pod it stands for, on its node,
+	# under a Job, which no ReplicaSet adopts, and is never a Service's
+	# endpoint.
+	let probe = (wall-probe effects effects bridge-echo echo {"pronto.dev/bridge": "true"} node-a localhost:5001/effects-airlock:latest IfNotPresent [{host: 1.1.1.1, port: 443, want: true}])
+	assert equal $probe.kind Job
+	assert equal $probe.metadata.name effects-wall-bridge-echo
+	assert equal $probe.spec.template.metadata.labels {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": echo, "pronto.dev/probe": wall, "pronto.dev/bridge": "true"}
+	assert equal $probe.spec.template.spec.nodeName node-a
+	assert equal $probe.spec.template.spec.automountServiceAccountToken false
+	assert equal $probe.spec.template.spec.containers.0.image localhost:5001/effects-airlock:latest
+	assert equal $probe.spec.template.spec.containers.0.command.0 deno
+	assert equal $probe.spec.template.spec.containers.0.readinessProbe.tcpSocket.port 1
+	assert equal ($probe.spec.template.spec.containers.0.env.0.value | from json) [{host: 1.1.1.1, port: 443, want: true}]
+	# Each role probes what it may reach and what it may not.
+	let probes = (wall-probes [echo:8080] pronto-wall-target)
+	let wants = ($probes | each {|p| {($p.as): ($p.targets | each {|t| $"($t.host):($t.port)=($t.want)" })} } | reduce -f {} {|r, acc| $acc | merge $r })
+	assert equal $wants {
+		airlock: ["database:5432=true" "airlock-mesh:3500=true" "1.1.1.1:443=false" "pronto-wall-target:8080=false" "echo:8080=false"]
+		airlock-mesh: ["1.1.1.1:443=true" "echo:8080=true" "database:5432=false" "pronto-wall-target:8080=false"]
+		echo: ["1.1.1.1:443=true" "database:5432=false" "airlock-mesh:3500=false" "pronto-wall-target:8080=false"]
+		wall-control: ["pronto-wall-target:8080=true" "airlock-mesh:3500=false" "airlock:9997=false" "echo:8080=false"]
+	}
+	assert equal ($probes | where as == echo | first | get labels) {"pronto.dev/bridge": "true"}
+	# Each family the cluster runs has its world; each address its key.
+	assert equal (pod-families [{status: {podIPs: [{ip: 10.244.0.4} {ip: "fd00:1::4"}]}}]) [IPv4 IPv6]
+	assert equal (pod-families [{status: {podIPs: [{ip: 10.244.0.4}]}}]) [IPv4]
+	let dual = (wall-probes [] pronto-wall-target --families [IPv4 IPv6] | where as == airlock-mesh | first | get targets | where want | get host)
+	assert equal $dual [1.1.1.1 "2606:4700:4700::1111"]
+	# Before the airlock's pods start, each role tries only what needs none
+	# of them: the world and the listener.
+	let before = (before-probes [echo:8080] [IPv4] | each {|p| {($p.as): ($p.targets | each {|t| $"($t.host)=($t.want)" })} } | reduce -f {} {|r, acc| $acc | merge $r })
+	assert equal $before {
+		airlock: ["1.1.1.1=false" "pronto-wall-target=false"]
+		airlock-mesh: ["1.1.1.1=true" "pronto-wall-target=false"]
+		echo: ["1.1.1.1=true" "pronto-wall-target=false"]
+		wall-control: ["pronto-wall-target=true"]
+	}
+	# A bridge's probe tries every other bridge.
+	assert equal (wall-probes [echo:8080 transport:8080] pronto-wall-target | where as == echo | first | get targets | where not want | get host) [database airlock-mesh pronto-wall-target transport]
+	assert equal (wall-key {host: database, address: "fd00::a", port: 5432}) "database@fd00::a:5432"
+	assert equal (wall-key {host: database, port: 5432}) "database:5432"
+	# Each Job's name is its role's, which no container's name can take.
+	assert equal ($probes | get job) [airlock airlock-mesh bridge-echo control]
+	# The control stands outside the app, so none of its policies holds it.
+	assert equal ($probes | where as == wall-control | first | get labels) {"app.kubernetes.io/name": pronto-wall-target-control}
+	# The listener: open to all, outside the app's name, behind its Service.
+	let target = (wall-target effects effects localhost:5001/effects-airlock:latest IfNotPresent)
+	assert equal ($target | get kind) [Job Service]
+	assert equal $target.0.spec.template.metadata.labels."app.kubernetes.io/name" effects-wall-target
+	assert equal $target.0.spec.template.spec.containers.0.readinessProbe.tcpSocket.port 8080
+	assert ("nodeName" not-in $target.0.spec.template.spec)
+	assert equal $target.1.metadata.name pronto-wall-target
+	assert equal $target.1.spec.selector {"app.kubernetes.io/name": effects-wall-target, "app.kubernetes.io/component": wall-target}
+	# A Job's name stays within 63 characters whatever the container's.
+	let long = (wall-job-name effects $"bridge-("x" | fill -c x -w 50)")
+	assert (($long | str length) <= 63) $long
+	assert ($long != (wall-job-name effects $"bridge-("y" | fill -c y -w 50)"))
+	# Another policy selecting one of the airlock's pods is refused: policies
+	# add up, so its allowances would open what the airlock's own close.
+	let bridge = {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": echo, "pronto.dev/bridge": "true"}
+	let policies = [
+		{metadata: {name: effects-bridge-echo}, spec: {podSelector: {matchLabels: {"app.kubernetes.io/name": effects, "app.kubernetes.io/component": echo}}}}
+		{metadata: {name: allow-web}, spec: {podSelector: {}}}
+		{metadata: {name: effects-backends-netpol}, spec: {podSelector: {matchExpressions: [{key: "app.kubernetes.io/component", operator: In, values: [crud auth]}]}}}
+		{metadata: {name: no-bridges}, spec: {podSelector: {matchExpressions: [{key: "pronto.dev/bridge", operator: DoesNotExist}]}}}
+		{metadata: {name: deployed}, spec: {podSelector: {matchLabels: {"app.kubernetes.io/component": echo}, matchExpressions: [{key: pod-template-hash, operator: Exists}]}}}
+		{metadata: {name: database}, spec: {podSelector: {matchLabels: {"cnpg.io/cluster": effects-db}}}}
+	]
+	# A label a Deployment's pods carry with a value the release cannot know
+	# may be what another policy selects them by.
+	assert equal (foreign-policies $policies [$bridge] [effects-bridge-echo]) [allow-web deployed]
+	# Before they start, any label an admission webhook might add may be: a
+	# policy selecting by one the release does not give is refused too, the
+	# release's own aside.
+	let admitted = ($policies | append {metadata: {name: trusted}, spec: {podSelector: {matchLabels: {"security.example/trusted": "true"}}}})
+	assert equal (foreign-policies $admitted [$bridge] [effects-bridge-echo database] --open) [allow-web deployed trusted]
+	# A probe goes beside each ready pod, never a predecessor still draining.
+	let ready = {type: Ready, status: "True"}
+	let pods = [
+		{metadata: {deletionTimestamp: "2026-11-16T00:00:00Z"}, spec: {nodeName: node-a}, status: {conditions: [$ready]}}
+		{metadata: {}, spec: {nodeName: node-b}, status: {conditions: [$ready]}}
+		{metadata: {}, spec: {nodeName: node-c}, status: {conditions: [{type: Ready, status: "False"}]}}
+		{metadata: {}, spec: {nodeName: node-b}, status: {conditions: [$ready]}}
+	]
+	assert equal ($pods | ready-nodes) [node-b]
+	# The verdict, from what each probe's rounds found.
+	let key = {|t| $"($t.host):($t.port)" }
+	let as_wanted = {|p| $p.targets | each {|t| {(do $key $t): (if $t.want { "reached" } else { "TimedOut" })} } | reduce -f {} {|r, acc| $acc | merge $r } }
+	let found = {|tweak| $probes | each {|p| let last = (do $tweak $p.as (do $as_wanted $p)); $p | insert result {first: $last, last: $last, held: 3, crossed: []} } }
+	let same = {|as, r| $r }
+	let judge = {|tweak| (wall-verdict (do $found $tweak)).refusal }
+	assert equal (do $judge $same) null
+	let unenforced = (do $judge {|as, r| if $as == airlock { $r | upsert "1.1.1.1:443" reached } else { $r } })
+	assert ($unenforced | str contains "airlock to 1.1.1.1:443") $unenforced
+	assert ($unenforced | str contains "enforces no NetworkPolicy") $unenforced
+	let meshed = (do $judge {|as, r| if $as == airlock-mesh { $r | upsert "database:5432" reached } else { $r } })
+	assert ($meshed | str contains "airlock-mesh to database:5432") $meshed
+	let bridged = (do $judge {|as, r| if $as == echo { $r | upsert "airlock-mesh:3500" reached } else { $r } })
+	assert ($bridged | str contains "echo to airlock-mesh:3500") $bridged
+	# A bridge whose own policy is missing reaches the listener only that
+	# policy keeps it from.
+	let unpoliced = (wall-verdict ((do $found {|as, r| if $as == echo { $r | upsert "pronto-wall-target:8080" reached } else { $r } }))).refusal
+	assert ($unpoliced | str contains "echo to pronto-wall-target:8080") $unpoliced
+	# Behind a firewall that lets nothing out, the forbidden fails whatever
+	# the policies: no control, no certificate.
+	let firewalled = (do $judge {|as, r| if $as != airlock { $r | upsert "1.1.1.1:443" ConnectionRefused } else { $r } })
+	assert ($firewalled | str contains "cannot tell the wall from a network that lets nothing out") $firewalled
+	let blind = (do $judge {|as, r| if $as == airlock { $r | reject "database:5432" } else { $r } })
+	assert ($blind | str contains "airlock to database:5432 (no answer)") $blind
+	# One agreeing round at the deadline is no finding.
+	let fleeting = (wall-verdict ((do $found $same) | update 0.result.held 1)).refusal
+	assert ($fleeting | str contains "did not hold three rounds running") $fleeting
+	# The probe's own program: a round tries every target at once, so a
+	# dozen that time out still hold three rounds well inside its budget.
+	let dropped = (1..12 | each {|i| {host: $"10.255.255.($i)", port: 443, want: false} })
+	let started = (date now)
+	let ran = (with-env {PROBE_TARGETS: ($dropped | to json --raw)} { deno eval --no-config $wall_probe_program } | from json)
+	assert equal $ran.held 3
+	assert equal $ran.crossed []
+	assert (((date now) - $started) < 60sec) "the probe tried its targets one after another"
+	# Any round past the wall, the first or a later one, is a plugin that
+	# starts a pod unprotected: refused, unless the environment's plugin is
+	# known to.
+	let late = ((do $found $same) | update 2.result.crossed ["database:5432"])
+	let unprotected = (wall-verdict $late)
+	assert ($unprotected.refusal | str contains "starts a pod unprotected") $unprotected.refusal
+	assert equal (wall-verdict $late --late) {refusal: null, early: ["echo to database:5432"]}
+}
+
+def test_airlock_secrets [] {
+	print "test an effect's secrets and a bridge's environment reach Secrets through stdin, never a manifest..."
+	let app = (resolve-app ($fixtures_dir | path join effects))
+	let compose = (open ($app.dir | path join compose.yaml))
+	let airlock = (airlock-services $compose (open ($app.dir | path join .pronto cluster.json)))
+	# Everything but the airlock's wiring and its seal keys is an effect's secret.
+	assert equal $airlock.secrets [ACQUIRER_KEY]
+	assert $airlock.seal
+	assert equal $airlock.env {AIRLOCK_DIR: /airlock, MESH_URL: "http://airlock-mesh:3500", PORT: "9997"}
+	assert equal $airlock.bridges {echo: {port: 8080, build: echo-appliance}, transport: {port: 8080, build: transport-appliance}}
+	assert equal $airlock.meshEnv {}
+	# The release's own environment holds an effect's secret, not compose's,
+	# whose value for a simulated effect is `simulator`.
+	let sealed = {ACQUIRER_KEY: sk_live_from_the_environment, AIRLOCK_SEAL_KEY: "cmVhbC1rZXk=", AIRLOCK_SEAL_KEY_PREVIOUS: ""}
+	let secrets = (with-env $sealed { airlock-secrets ($compose | upsert services.airlock.environment.ACQUIRER_KEY simulator) $airlock })
+	assert equal $secrets.values {ACQUIRER_KEY: sk_live_from_the_environment, AIRLOCK_SEAL_KEY: "cmVhbC1rZXk="}
+	let unset = (try { with-env ($sealed | merge {ACQUIRER_KEY: ""}) { airlock-secrets $compose $airlock }; "" } catch {|e| $e.msg })
+	assert ($unset | str contains "declare ACQUIRER_KEY, which this release's environment does not set") $unset
+	assert ($secrets.digest =~ '^[0-9a-f]{64}$')
+	assert equal $secrets.bridges.transport.values {TRANSPORT_TOKEN: tt_from_the_environment}
+	assert ($secrets.bridges.echo.digest != $secrets.bridges.transport.digest)
+	let payload = (opaque-secret effects-airlock effects $secrets.values)
+	assert equal $payload.metadata {name: effects-airlock, namespace: effects}
+	assert ($payload.stringData? == null)
+	assert equal ($payload.data.ACQUIRER_KEY | decode base64 | decode utf-8) sk_live_from_the_environment
+	# The blob plane's address is all of the daprd's environment the release keeps.
+	let blobs = ($compose | upsert services.airlock-mesh.environment.BLOBS_S3_URL "http://rclone-s3:3900")
+	assert equal (airlock-services $blobs (open ($app.dir | path join .pronto cluster.json))).meshEnv {BLOBS_S3_URL: "http://rclone-s3:3900"}
+}
+
+def test_airlock_seal [] {
+	print "test the seal key comes from the release's environment, is required, and is never the development key..."
+	let app = (resolve-app ($fixtures_dir | path join effects))
+	let compose = (open ($app.dir | path join compose.yaml))
+	let airlock = (airlock-services $compose (open ($app.dir | path join .pronto cluster.json)))
+	let refusal = {|vars| try { with-env ({ACQUIRER_KEY: sk_live_from_the_environment, AIRLOCK_SEAL_KEY: "", AIRLOCK_SEAL_KEY_PREVIOUS: ""} | merge $vars) { airlock-secrets $compose $airlock }; "" } catch {|e| $e.msg } }
+	assert ((do $refusal {}) | str contains "AIRLOCK_SEAL_KEY is required")
+	# compose's value is the development key, however the release spells it.
+	for dev in ["ZGV2LXNlYWwta2V5" "ZGV2LXNl\nYWwta2V5==" " ZGV2LXNlYWwta2V5\n"] {
+		assert ((do $refusal {AIRLOCK_SEAL_KEY: $dev}) | str contains "development key") $dev
+	}
+	assert ((do $refusal {AIRLOCK_SEAL_KEY: "cmVhbC1rZXk=", AIRLOCK_SEAL_KEY_PREVIOUS: "ZGV2LXNlYWwta2V5"}) | str contains "development key")
+	# A rotation holds the replaced key beside the new one, and rolls the airlock.
+	let one = (with-env {ACQUIRER_KEY: a, AIRLOCK_SEAL_KEY: "cmVhbC1rZXk=", AIRLOCK_SEAL_KEY_PREVIOUS: ""} { airlock-secrets $compose $airlock })
+	let rotated = (with-env {ACQUIRER_KEY: a, AIRLOCK_SEAL_KEY: "bmV3LWtleQ==", AIRLOCK_SEAL_KEY_PREVIOUS: "cmVhbC1rZXk="} { airlock-secrets $compose $airlock })
+	assert equal $rotated.values {ACQUIRER_KEY: a, AIRLOCK_SEAL_KEY: "bmV3LWtleQ==", AIRLOCK_SEAL_KEY_PREVIOUS: "cmVhbC1rZXk="}
+	assert ($one.digest != $rotated.digest)
+	# Without a secret field the airlock holds no seal key, and none is asked for.
+	let plain = ($compose | update services.airlock.environment {|c| $c.services.airlock.environment | reject AIRLOCK_SEAL_KEY AIRLOCK_SEAL_KEY_PREVIOUS AIRLOCK_SEAL_DEV })
+	let unsealed = (airlock-services $plain (open ($app.dir | path join .pronto cluster.json)))
+	assert not $unsealed.seal
+	assert equal (with-env {ACQUIRER_KEY: a, AIRLOCK_SEAL_KEY: ""} { airlock-secrets $plain $unsealed }).values {ACQUIRER_KEY: a}
+}
+
+def test_airlock_refusals [] {
+	print "test what the k8s release cannot deploy of the airlock is refused, not omitted..."
+	let app = (resolve-app ($fixtures_dir | path join effects))
+	let compose = (open ($app.dir | path join compose.yaml))
+	let facts = (open ($app.dir | path join .pronto cluster.json))
+	let refusal = {|f| try { do $f; "" } catch {|e| $e.msg } }
+	# The AI gateway is not run: an effect reaching it on k8s is refused, and
+	# an app whose effects reach it elsewhere alone releases without it.
+	assert ("tsbifrost" not-in (runtime-services ($compose | upsert services.tsbifrost {image: x})))
+	let gateway = (do $refusal { airlock-services $compose ($facts | upsert endpoints.k8s.charge "http://tsbifrost:4000") })
+	assert ($gateway | str contains "effect charge reaches the AI gateway on k8s") $gateway
+	# A bridge's container may not take a name the release's own services hold.
+	for name in [redis crud-dapr pronto-wall-target] {
+		let taken = (do $refusal { airlock-services ($compose | upsert services.x-appliance {image: x}) ($facts | upsert bridges.1.container $name | upsert bridges.1.build x-appliance) })
+		assert ($taken | str contains $"names container ($name)") $taken
+	}
+	assert ((do $refusal { airlock-services ($compose | reject services.transport-appliance) $facts }) | str contains "builds no transport-appliance")
+	assert ((do $refusal { airlock-services $compose ($facts | reject endpoints) }) | str contains "generate the app")
+	# A null endpoint is an effect k8s has no sink for; with the policies off
+	# the airlock has no wall.
+	let unreached = (try { render-manifests (resolve-app ($fixtures_dir | path join unreached)).cue_path kind; "" } catch {|e| $e.msg })
+	assert ($unreached | str contains "effect charge names no sink the k8s release reaches") $unreached
+	let file = (mktemp -t effects.XXXXXX.json | str trim)
+	{App: {networkPolicy: {enabled: false}}} | to json | save -f $file
+	let unwalled = (try { render-manifests $app.cue_path kind --data $file; "" } catch {|e| $e.msg })
+	rm $file
+	assert ($unwalled | str contains "the airlock's wall is its NetworkPolicies") $unwalled
+	# Nor an app in a namespace of the cluster's own, whose services admit
+	# every pod of theirs.
+	let shared = (try { effects-manifests --data {namespace: cnpg-system}; "" } catch {|e| $e.msg })
+	assert ($shared | str contains "would share namespace cnpg-system") $shared
+	# Nor one CloudNativePG's Services for the database hold.
+	let cnpg = (try { effects-manifests --data {airlock: {bridges: {effects-db-rw: {port: 8080, build: echo-appliance}}}}; "" } catch {|e| $e.msg })
+	assert ($cnpg | str contains "names container effects-db-rw, which the database's Service names") $cnpg
+	# An app without effects renders no airlock.
+	assert ((render-manifests (resolve-app ($fixtures_dir | path join sample)).cue_path kind) | from yaml | where {|d| $d.metadata.name =~ airlock } | is-empty)
 }

@@ -261,7 +261,7 @@ state: fixture: src: "tests/fixtures/visual.sql"
 ### Schedules
 
 Periodic work is declared as `schedules` (`#Schedule` in `schema.cue`), and
-mecha's [ticker](https://github.com/bonisoft3/mecha/blob/v0.25.0/services/ticker/README.md) turns each
+mecha's [ticker](https://github.com/bonisoft3/mecha/blob/v0.25.1/services/ticker/README.md) turns each
 occurrence into a row the app's pipelines read; how it wakes, what it
 guarantees and how to choose a cadence are there.
 
