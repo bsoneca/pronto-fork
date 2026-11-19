@@ -26,7 +26,7 @@ import { generateTypeSQL } from "./type-sql.ts";
 import { generateProto, type ProtoEntity } from "./type-proto.ts";
 import { checkTypeSeeds, type TypeEntity } from "./type-check.ts";
 import { parseHeld, seedSql, type SeedData } from "./seed.ts";
-import { type Program, renderIr, writeIrStylesheet } from "./ir-render.ts";
+import { composeIr, type Program, renderIr, writeIrStylesheet } from "./ir-render.ts";
 import { irMarkdown } from "./ir-md.ts";
 import { declaredMachine } from "./mecha-spec.ts";
 import { compileMechaPorts } from "./mecha-ports.ts";
@@ -614,7 +614,10 @@ async function drawIr(drawn: Drawing | undefined): Promise<boolean> {
   const redrawn = await renderIr(appDir, ir, program, facts);
   // ir.md beside it, the whole document as Markdown: from the author's prose and the cards both,
   // so it is written whenever either moved (ir-md.ts).
-  const md = irMarkdown(await Deno.readTextFile(`${appDir}/${ir}`), ir);
+  // Composed, so an ir split into ir/*.html fragments keeps every fragment's sections in it.
+  const composed = await composeIr(appDir, ir);
+  if (composed === null) throw new Error(`${ir}: missing`);
+  const md = irMarkdown(composed.html, ir);
   const mdPath = `${appDir}/${ir.replace(/\.html$/, "")}.md`;
   if ((await Deno.readTextFile(mdPath).catch(() => null)) !== md) await Deno.writeTextFile(mdPath, md);
   return redrawn;

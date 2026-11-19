@@ -83,6 +83,19 @@ Deno.test("an evaluation learned large takes the cue lock (memory is a lock, not
   assertMatch(r.stderr, /slot: cue \.: weight 0 of [0-9.]+ \(cue lock\)/);
 });
 
+// A pt_BR machine's awk wrote the claim as "3,0", which slot.ts's Number() refused: every claimed
+// evaluation died on slot's usage line.
+Deno.test("a claim is a decimal slot.ts reads under a locale whose separator is a comma", async () => {
+  const dir = await Deno.makeTempDir();
+  await fake(dir);
+  await run(dir, ["vet", "-c", "./spec"], { CUE_UNKNOWN_GB: "1" });
+  const file = (await Array.fromAsync(Deno.readDir(`${dir}/.cache/pronto/cue-mem`)))[0].name;
+  await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${file}`, "2.4 cue vet -c ./spec\n");
+  const r = await run(dir, ["vet", "-c", "./spec"], { LANG: "pt_BR.UTF-8", LC_ALL: "pt_BR.UTF-8" });
+  assertEquals(r.code, 0, r.stderr);
+  assertMatch(r.stderr, /slot: cue \.: weight 0 of [0-9.]+ \(cue lock\)/);
+});
+
 Deno.test("stdin reaches cue on both paths", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir);

@@ -33,6 +33,9 @@
 # (tools/machine). Best effort: it never changes an exit code or what is printed.
 
 self=$(cd "$(dirname "$0")" && pwd)
+# The claims are decimals awk writes and slot.ts's Number() reads: under a locale whose separator is a
+# comma (pt_BR) awk wrote "4,9", which Number() refused, and every claimed evaluation failed.
+LC_ALL=C; export LC_ALL
 # The real cue: the first on the PATH that is no budget wrapper (this one, a runtime's, a machine's:
 # two that skipped only themselves would exec each other for ever) and no mise shim (which runs
 # mise, which puts a wrapper first again); found once, and handed down.

@@ -15,6 +15,7 @@ import { types, type Types } from "./portable-types.ts";
 import { programPackage, readApp } from "./derive.ts";
 import { readCheckInputs } from "./check-inputs.ts";
 import { ifMissing } from "./missing.ts";
+import { composeIr, irFragments } from "./ir-render.ts";
 
 export type FieldId = { name: string; type: string; retired: boolean; precision?: number; scale?: number };
 export type EntityId = { name: string; fields: Record<string, FieldId> };
@@ -220,10 +221,13 @@ export async function mint(appDir: string, read?: ProgramEntity[]): Promise<void
   if (unminted.length > 0) throw new Error(`still unminted after stamping: ${unminted.join(", ")}`);
 
   const fresh = (await readSnapshot(appDir)) === undefined;
-  const irPath = `${appDir}/ir.html`;
-  let ir = await Deno.readTextFile(irPath);
-  for (const e of after) ir = stampIr(ir, e as Required<Pick<ProgramEntity, "id">> & ProgramEntity, fresh);
-  await Deno.writeTextFile(irPath, ir);
+  // An entity's section may live in an ir/*.html fragment: each file is stamped where it holds one.
+  const root = await Deno.readTextFile(`${appDir}/ir.html`);
+  for (const file of ["ir.html", ...irFragments(root)]) {
+    let ir = file === "ir.html" ? root : await Deno.readTextFile(`${appDir}/${file}`);
+    for (const e of after) ir = stampIr(ir, e as Required<Pick<ProgramEntity, "id">> & ProgramEntity, fresh);
+    await Deno.writeTextFile(`${appDir}/${file}`, ir);
+  }
 
   const program = identitiesOf(after);
   const snapshot = (await readSnapshot(appDir)) ?? {};
@@ -261,7 +265,9 @@ async function check(appDir: string): Promise<void> {
       }
     }
   }
-  findings.push(...irDisagreements(await Deno.readTextFile(`${appDir}/ir.html`), entities));
+  const composed = await composeIr(appDir, "ir.html");
+  if (composed === null) throw new Error(`${appDir}/ir.html: missing`);
+  findings.push(...irDisagreements(composed.html, entities));
   console.log(JSON.stringify(findings, null, 2));
   if (findings.some((f) => f.severity === "error")) Deno.exit(1);
 }
