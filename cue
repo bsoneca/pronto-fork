@@ -152,7 +152,10 @@ id=$(printf '%s' "$key" | md5 -q 2>/dev/null || printf '%s' "$key" | md5sum | cu
 learned="${HOME:-${TMPDIR:-/tmp}}/.cache/pronto/cue-mem/$id"
 mkdir -p "${learned%/*}" 2>/dev/null || learned=/dev/null
 last=$(cut -d' ' -f1 "$learned" 2>/dev/null)
-mem=$(awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_DIRECT_GB:-1}" 'BEGIN {
+# LC_ALL=C: awk's printf follows LC_NUMERIC, which a comma-decimal locale (pt_BR, de, fr, ...)
+# turns into "8,1" instead of "8.1"; slot.ts's Number() on that is NaN, and every claimed
+# evaluation on such a machine fails with the generic usage error (found 2026-11-25).
+mem=$(LC_ALL=C awk -v l="${last:-}" -v unknown="${CUE_UNKNOWN_GB:-24}" -v direct="${CUE_DIRECT_GB:-1}" 'BEGIN {
   if (l == "") { print unknown; exit }
   if (l + 0 < direct + 0) { print 0; exit }
   printf "%.1f\n", l * 1.25 }')
@@ -240,7 +243,8 @@ if [ "$mem" = 0 ]; then
   wait "$pid"; code=$?
   while kill -0 "$pid" 2>/dev/null; do wait "$pid"; code=$?; done
   # Its peak (GB) into the learned file, its CPU seconds beside it (<id>.secs), its seconds for the store.
-  measured=$(awk -v s="$scale" '/maximum resident set size/ { v = $1 } / real / { r = $1; c = $3 + $5 } /^[0-9]+ [0-9.]+ [0-9.]+ [0-9.]+$/ { v = $1; r = $2; c = $3 + $4 } END { if (v != "") printf "%.2f %.2f %.2f\n", v / s, r, c }' "$t" 2>/dev/null)
+  # LC_ALL=C: same reason as $mem above; this one is read back as $learned (the next run's $last).
+  measured=$(LC_ALL=C awk -v s="$scale" '/maximum resident set size/ { v = $1 } / real / { r = $1; c = $3 + $5 } /^[0-9]+ [0-9.]+ [0-9.]+ [0-9.]+$/ { v = $1; r = $2; c = $3 + $4 } END { if (v != "") printf "%.2f %.2f %.2f\n", v / s, r, c }' "$t" 2>/dev/null)
   if [ -n "$measured" ] && [ "$learned" != /dev/null ]; then
     { printf '%s cue %s\n' "${measured%% *}" "$*" > "$learned.$$" && mv "$learned.$$" "$learned"
       printf '%s\n' "${measured##* }" > "$learned.secs.$$" && mv "$learned.secs.$$" "$learned.secs"; } 2>/dev/null

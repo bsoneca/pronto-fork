@@ -91,6 +91,20 @@ Deno.test("an evaluation learned large takes the cue lock (memory is a lock, not
   assertMatch(r.stderr, /slot: cue \.: weight 0 of [0-9.]+ \(cue lock\)/);
 });
 
+Deno.test("a comma-decimal locale does not turn the learned claim into a usage error", async () => {
+  // $mem is 1.25x the learned peak, printed by awk: under LC_NUMERIC=pt_BR.UTF-8 (or any
+  // comma-decimal locale) an unguarded printf "%.1f" prints "2,5", which slot.ts's Number()
+  // reads as NaN, so the wrapper fails with its usage message instead of taking the cue lock.
+  const dir = await Deno.makeTempDir();
+  await fake(dir);
+  await run(dir, ["vet", "-c", "./spec"], { CUE_UNKNOWN_GB: "1" });
+  const file = (await Array.fromAsync(Deno.readDir(`${dir}/.cache/pronto/cue-mem`)))[0].name;
+  await Deno.writeTextFile(`${dir}/.cache/pronto/cue-mem/${file}`, "2 cue vet -c ./spec\n");
+  const r = await run(dir, ["vet", "-c", "./spec"], { LANG: "pt_BR.UTF-8", LC_NUMERIC: "pt_BR.UTF-8" });
+  assertMatch(r.stderr, /slot: cue \.: weight 0 of [0-9.]+ \(cue lock\)/);
+  assertEquals(r.stderr.includes("usage: deno run"), false, "a comma mem must not reach slot.ts as NaN");
+});
+
 Deno.test("stdin reaches cue on both paths", async () => {
   const dir = await Deno.makeTempDir();
   await fake(dir);
